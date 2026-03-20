@@ -423,6 +423,38 @@ const SubagentParams = Type.Object({
 });
 
 export default function (pi: ExtensionAPI) {
+	// Show available agents in startup summary
+	pi.registerMessageRenderer("subagent-agents", (message, _options, theme) => {
+		const sectionHeader = theme.fg("mdHeading", "[Agents]");
+		return new Text(`${sectionHeader}\n${message.content}`, 0, 0);
+	});
+
+	pi.on("session_start", async (_event, ctx) => {
+		const discovery = discoverAgents(ctx.cwd, "both");
+		const agents = discovery.agents;
+		if (agents.length === 0) return;
+
+		const userAgents = agents.filter((a) => a.source === "user");
+		const projectAgents = agents.filter((a) => a.source === "project");
+
+		const lines: string[] = [];
+		for (const group of [
+			{ label: "user", agents: userAgents },
+			{ label: "project", agents: projectAgents },
+		]) {
+			if (group.agents.length === 0) continue;
+			for (const a of group.agents) {
+				lines.push(`  ${a.name}`);
+			}
+		}
+
+		pi.sendMessage({
+			customType: "subagent-agents",
+			content: lines.join("\n"),
+			display: true,
+		});
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",

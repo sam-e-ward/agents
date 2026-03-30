@@ -172,6 +172,130 @@ This file is the same across all tools — it's about the _code_, not the agent 
 
 ---
 
+## 6. Team Implement (`team-implement`)
+
+A compound command (skill, extension, or macro — depending on the tool) that chains agents together to go from a user prompt to reviewed, checked code. It runs the full development loop automatically.
+
+### Flow
+
+```
+User prompt
+    │
+    ▼
+┌─────────┐
+│  Scout   │  Gather codebase context
+└────┬─────┘
+     │ context
+     ▼
+┌─────────┐
+│ Planner  │  Create implementation plan
+└────┬─────┘
+     │ plan
+     ▼
+┌───────────────────────────────────────┐
+│           Development Loop (max 3)    │
+│                                       │
+│  ┌───────────┐                        │
+│  │ Developer  │  Implement the plan   │
+│  └─────┬─────┘                        │
+│        │ code changes                 │
+│        ▼                              │
+│  ┌─────────────┐  ┌──────────────┐   │
+│  │ Code Review  │  │ Arch Review  │   │  (parallel)
+│  └─────┬───────┘  └──────┬───────┘   │
+│        │ issues           │ issues    │
+│        └────────┬─────────┘           │
+│                 ▼                     │
+│        ┌──────────────┐               │
+│        │ Plan Checker  │              │
+│        └──────┬───────┘               │
+│               │                       │
+│        pass? ─┤                       │
+│        yes    │ no (or review issues) │
+│         │     └──► loop back ─────────┤
+│         ▼                             │
+│       Done                            │
+└───────────────────────────────────────┘
+```
+
+### Phase details
+
+| Phase | Agent | Input | Output | Notes |
+|---|---|---|---|---|
+| **1. Recon** | `scout` | User prompt | Compressed context (files, types, architecture) | Max 10 files, 100 lines |
+| **2. Plan** | `planner` | User prompt + scout output | Numbered implementation plan | Read-only, under 50 lines |
+| **3. Develop** | `developer` | Plan + scout context | Code changes | Builds/tests to verify |
+| **4a. Review** | `code-review` | Changed files | Issues (critical/warning/info) | Parallel with 4b |
+| **4b. Arch Review** | `arch-review` | Changed files + philosophy.md | Architecture violations | Parallel with 4a |
+| **5. Plan Check** | `plan-checker` | Original plan + changed files | Pass/fail + gaps | Determines if loop continues |
+
+### Loop logic
+
+After each develop → review → plan-check cycle:
+
+1. **Exit the loop** if:
+   - Plan checker passes AND no critical/warning review issues
+   - Maximum of 3 development loops reached (exit with summary of remaining issues)
+
+2. **Loop again** if:
+   - There are critical or warning issues from code-review or arch-review
+   - Plan checker identifies missing plan steps
+   - Feed the combined review feedback + plan gaps back to the developer as the next iteration's input
+
+### What gets passed between agents
+
+Each agent receives only what it needs:
+
+- **Scout** gets the raw user prompt
+- **Planner** gets the user prompt + scout's structured output
+- **Developer** gets the plan + scout context (first loop) or plan + review feedback (subsequent loops)
+- **Code Review / Arch Review** get the list of changed files (from `git diff`)
+- **Plan Checker** gets the original plan + the current state of changed files
+
+### Implementing per tool
+
+The mechanism differs by tool, but the logic is the same:
+
+- **pi**: Implement as an extension or skill that uses `subagent` calls in a chain/loop. Pi's `subagent` tool supports `chain` mode for sequential handoff and `parallel` mode for the review phase.
+- **opencode**: Check if the tool supports macros, workflows, or scripted agent chains. If not, implement as a shell script that invokes the CLI repeatedly, piping output between calls.
+
+### Example pseudocode
+
+```
+context = invoke(scout, user_prompt)
+plan = invoke(planner, user_prompt + context)
+
+for i in 1..3:
+    if i == 1:
+        invoke(developer, plan + context)
+    else:
+        invoke(developer, plan + context + feedback)
+
+    review_issues = invoke_parallel(
+        code_review(changed_files),
+        arch_review(changed_files)
+    )
+    plan_gaps = invoke(plan_checker, plan + changed_files)
+
+    if no critical issues AND plan passes:
+        break
+
+    feedback = review_issues + plan_gaps
+
+report summary
+```
+
+### Output
+
+When the loop completes, report:
+
+- **What was done** — list of changed files with one-line descriptions
+- **Loop count** — how many dev iterations it took
+- **Remaining issues** — any warnings/info items not addressed (if max loops hit)
+- **How to verify** — build/test commands to run
+
+---
+
 ## Tool-Specific Extras
 
 Some tools support additional customisation that doesn't fit the categories above. Put these in the tool's directory but don't expect them to be portable:

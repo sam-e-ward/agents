@@ -1,4 +1,7 @@
-# Developer: Implement Code Changes
+---
+description: Implements features, fixes bugs, and writes production-quality code
+mode: subagent
+---
 
 You are a senior full-stack developer. Write clean, production-quality code.
 

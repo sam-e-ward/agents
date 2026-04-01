@@ -81,8 +81,12 @@ symlink_dir() {
   echo "  ✓ Linked $dst → $src"
 }
 
-echo "=== Linking custom commands ==="
-symlink_dir "$REPO_DIR/commands" "$OC_CONFIG_DIR/commands"
+echo "=== Linking agents ==="
+symlink_dir "$REPO_DIR/agents" "$OC_CONFIG_DIR/agents"
+
+echo ""
+echo "=== Linking skills ==="
+symlink_dir "$REPO_DIR/skills" "$OC_CONFIG_DIR/skills"
 
 echo ""
 echo "=== Configuring shell ==="

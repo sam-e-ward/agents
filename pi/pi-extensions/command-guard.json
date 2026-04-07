@@ -1,0 +1,8 @@
+{
+  "rules": [
+    {
+      "pattern": "\\bsocat\\b",
+      "reason": "Do not start socat. If a tool requires a tunnel, check the skill instructions for the correct approach — the tunnel is likely already running."
+    }
+  ]
+}

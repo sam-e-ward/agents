@@ -5,7 +5,7 @@ import { Text } from "@mariozechner/pi-tui";
 import { execSync } from "node:child_process";
 
 const OS_PORT = process.env.OPENSEARCH_PORT ?? "9201";
-const OS_BASE = `https://localhost:${OS_PORT}`;
+const OS_BASE = `http://localhost:${OS_PORT}`;
 
 // ── HTTP helpers ───────────────────────────────────────────────────────
 

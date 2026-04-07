@@ -11,11 +11,11 @@ Search and analyze Kubernetes application logs via OpenSearch. This skill provid
 
 The `kube_logs` tool makes HTTP GETs/POSTs to `localhost:9201` (OpenSearch search API only). It cannot execute commands, connect to clusters, or modify anything. **Do not use the `bash` tool for log queries.**
 
-If the tool reports that OpenSearch is unreachable, tell the user to start a port-forward and stop. Do not attempt to fix connectivity.
+If the tool reports that OpenSearch is unreachable, tell the user to start a port-forward and stop. **Do not attempt to fix connectivity yourself — never use bash to debug, start, or restart socat, ssh tunnels, or any port-forwarding process.** Just ask the user to set it up and wait.
 
 ## Setup
 
-The user must forward OpenSearch to localhost first. From a session with network access:
+The user must forward OpenSearch to localhost first. **This is the user's responsibility — never start, restart, or debug port-forwards yourself.** If connectivity fails, show the user these commands and stop:
 
 ```bash
 # Via SSH tunnel (if OpenSearch is accessible via Tailscale on a remote host):

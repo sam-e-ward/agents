@@ -13,7 +13,8 @@
   "pi": {
     "extensions": [
       "./pi-extensions",
-      "./skills/victoria-metrics/extension"
+      "./skills/victoria-metrics/extension",
+      "./skills/kube-logs/extension"
     ],
     "skills": [
       "./skills"

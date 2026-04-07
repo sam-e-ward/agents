@@ -1,108 +1,148 @@
 ---
 name: kube-logs
-description: "Analyze Kubernetes pod/container logs that have been dumped to files. Find time gaps, extract pattern search timelines, and investigate slow requests. Safe read-only analysis — no kubectl access."
+description: "Search and analyze Kubernetes application logs via OpenSearch. Find slow requests, errors, trace request flows, and investigate incidents. Safe read-only access — queries only."
 ---
 
-# Kube Logs Analysis Skill
+# Kube Logs Skill
 
-Analyze Kubernetes log files that have been pre-dumped to `~/kube-logs/`. This skill provides read-only tools for structured log analysis — it cannot run kubectl, docker, or any other command.
+Search and analyze Kubernetes application logs via OpenSearch. This skill provides a `kube_logs` tool that can **only perform read-only HTTP queries** against a local port. It cannot run kubectl, docker, or any other command.
 
 ## Safety
 
-This skill provides a custom `kube_logs` tool that can **only read files** from `~/kube-logs/`. It cannot execute commands, connect to clusters, or modify anything. Use this tool exclusively for log analysis. **Do not use the `bash` tool for log processing.**
+The `kube_logs` tool makes HTTP GETs/POSTs to `localhost:9201` (OpenSearch search API only). It cannot execute commands, connect to clusters, or modify anything. **Do not use the `bash` tool for log queries.**
 
-If no log files are found, tell the user to dump logs from a privileged session and stop. Do not attempt to fetch logs yourself.
+If the tool reports that OpenSearch is unreachable, tell the user to start a port-forward and stop. Do not attempt to fix connectivity.
 
 ## Setup
 
-The user must dump logs from a privileged session first:
+The user must forward OpenSearch to localhost first. From a session with network access:
 
 ```bash
-# From a session with kubectl access:
-mkdir -p ~/kube-logs
-just kube logs statefulset/cf-prod-be-82 > ~/kube-logs/cf-prod-be-82.log
+# Via SSH tunnel (if OpenSearch is accessible via Tailscale on a remote host):
+ssh -L 9201:cf-prod-opensearch:443 <jumphost> -N &
+
+# Or, if running on a host with direct Tailscale access:
+socat TCP-LISTEN:9201,fork,reuseaddr OPENSSL:cf-prod-opensearch:443,verify=0 &
 ```
 
 ## Tool
 
-### `kube_logs` — Read and analyze log files
+### `kube_logs` — Search and analyze logs
 
 **Actions:**
 
-- `list` — List available log files in `~/kube-logs/`
-- `read` — Read a log file, optionally filtered by time range
-- `gaps` — Find time gaps between consecutive log lines (reveals slow operations)
-- `timeline` — Extract a structured timeline of operations between two timestamps
+- `services` — List available container/service names
+- `search` — Search logs with filters (service, time range, text match)
+- `slow_requests` — Find the slowest HTTP requests (uwsgi `generated X bytes in Y msecs`)
+- `errors` — Find error-level log lines
+- `count` — Count log lines matching filters, grouped by service or time interval
 
 ### Examples
 
 ```
-kube_logs(action: "list")
-kube_logs(action: "read", file: "cf-prod-be-82.log", start: "14:11:00", end: "14:20:00")
-kube_logs(action: "read", file: "cf-prod-be-82.log", start: "14:11:00", end: "14:20:00", grep: "results for pattern")
-kube_logs(action: "gaps", file: "cf-prod-be-82.log", start: "14:11:00", end: "14:20:00", min_gap: 10)
-kube_logs(action: "timeline", file: "cf-prod-be-82.log", start: "14:11:00", end: "14:20:00")
+kube_logs(action: "services")
+kube_logs(action: "search", service: "cf-prod-be", start: "2026-04-07T14:10:00", end: "2026-04-07T14:20:00")
+kube_logs(action: "search", service: "cf-prod-be", start: "-5m", grep: "SIGPIPE")
+kube_logs(action: "slow_requests", start: "-30m", min_duration_ms: 5000)
+kube_logs(action: "slow_requests", service: "cf-prod-api", start: "-1h", limit: 20)
+kube_logs(action: "errors", service: "cf-prod-be", start: "-15m")
+kube_logs(action: "count", start: "-1h", group_by: "service")
 ```
 
 ## Workflow
 
-### Step 1 — Check available logs
+### Step 1 — Check connectivity
 
 ```
-kube_logs(action: "list")
+kube_logs(action: "services")
 ```
 
-If no files exist, tell the user:
-> No log files found in ~/kube-logs/. Dump logs from a privileged session first:
-> ```
-> mkdir -p ~/kube-logs
-> just kube logs <resource> > ~/kube-logs/<name>.log
-> ```
+If this fails, relay the setup instructions to the user and stop.
 
-### Step 2 — Identify the time window
+### Step 2 — Load or create environment knowledge
 
-Ask the user what time range to investigate, or use `read` to scan the file and find relevant timestamps.
+Knowledge files are stored at `~/.pi/kube-logs-knowledge/<environment>.md`.
 
-### Step 3 — Analyze
+1. **Identify the environment**: the `services` action auto-detects the environment from OpenSearch index names (e.g. `cf-prod` from `cf-prod-fluentd-2026.04.07`).
 
-Use the appropriate action:
+2. **Load knowledge**: read `~/.pi/kube-logs-knowledge/<environment>.md` if it exists. This contains previously discovered information about the environment — service names, log formats, request flows, known slow paths, and what is normal. Pay close attention to these — they prevent you from misinterpreting expected behaviour as problems.
 
-- **`gaps`** to find where time was spent (big gaps = slow operations)
-- **`read` with `grep`** to filter for specific log patterns
-- **`timeline`** for a structured overview of what happened
+3. **First time? Run discovery** (only if no knowledge file exists):
+   ```
+   kube_logs(action: "services")
+   kube_logs(action: "count", start: "-1h", group_by: "service")
+   ```
+   Then create the knowledge file with what was found. Use the template below.
 
-### Step 4 — Investigate specific patterns
+### Step 3 — Investigate the user's question
 
-For Countfire backend logs, common patterns to grep for:
+Choose the right action based on the question:
 
-- `"results for pattern"` — pattern search results (selection_id is the number after "pattern")
-- `"Starting TrackedSearch"` — drawing load initiated
-- `"Loading file"` — asset library fetch
-- `"Adding .* elements to the SearchManager"` — element count
-- `"remaining unseen patterns"` — number of patterns to search
-- `"Resolving clash"` — clash resolution phase
-- `"SIGPIPE"` — client disconnected (timeout)
-- `"Reapplying action"` — operation replay
-- `"Classifier loaded"` — classifier initialization
+- **"Find slow requests"** → `slow_requests` with appropriate service/time filters
+- **"What happened at 14:15?"** → `search` with a narrow time window
+- **"Any errors in the last hour?"** → `errors` with `start: "-1h"`
+- **"Which service is busiest?"** → `count` with `group_by: "service"`
 
-## Countfire Log Analysis Patterns
+Once you've identified an interesting request or time window, use `search` with a narrow time range to see the full context — surrounding log lines, the sequence of operations, and timing.
 
-### Slow Drawing Load
+### Step 4 — Update knowledge
 
-A typical drawing load flows through:
-1. `Starting TrackedSearch` — session begins
-2. `Loading file` — fetch SVG from asset library (can be slow for large files)
-3. `Skipped N duplicates during parsed svg load` — SVG parsing
-4. `Ignoring N elements` — filter/background rules applied
-5. `Adding N elements to the SearchManager` — index built
-6. `Classifier loaded` — ML classifier initialized
-7. `N remaining unseen patterns after pattern search cache` — patterns to search
-8. Per-pattern results logged
-9. `Resolving clash` — clash resolution
-10. Response sent (or SIGPIPE if client timed out)
+If you discovered anything new about the environment (a service's log format, request flow patterns, what's normal, known slow paths, incident learnings), **append it to the knowledge file** so future sessions benefit.
 
-### Finding Slow Patterns
+## Analysis Tips
 
-Use `gaps` to find time gaps during pattern search. The pattern logged immediately AFTER a gap is the one that was slow (it was the last to finish on the parallel worker pool). With N CPU cores, the first N patterns completing after a gap represent one-per-core — the slowest of that batch.
+### uwsgi Request Lines
 
-The pattern IDs in the log correspond to `selection_id` values in the database.
+Many services use uwsgi which logs request completion as:
+```
+[pid: 850|app: 0|req: 810/1594] 172.16.x.x () {N vars in N bytes} [Tue Apr 7 14:11:03 2026] GET /path => generated N bytes in N msecs (HTTP/1.1 200) ...
+```
+
+Key fields:
+- **pid** — worker process ID (same pid = same worker)
+- **req: N/M** — request number for this worker / total
+- **generated N bytes in N msecs** — response size and total duration
+- **HTTP status** — 200, 500, etc.
+
+For long requests, use `search` to find all log lines from that pid in that time window to understand what happened inside the request.
+
+### Time Gaps in Sequential Services
+
+Some services process requests sequentially per worker (e.g. backend workers). When analyzing logs from these services, large time gaps between consecutive log lines from the same pid indicate slow operations — the worker was busy doing something that didn't produce log output.
+
+### Correlating Across Services
+
+A single user action often touches multiple services. Use timestamps and request paths to correlate log lines across services.
+
+## Knowledge File Template
+
+```markdown
+# Environment: <environment-name>
+
+## Environment Info
+- Environment: <environment-name>
+- Discovered: <date>
+
+## Services
+- <service-name>: <description, what it does>
+
+## Log Formats
+- <service>: <describe the log format, what fields are present>
+
+## Request Flows
+- <describe how requests flow through services>
+- <note which services are sequential per worker vs concurrent>
+
+## Known Slow Paths
+- <endpoint or operation>: <typical duration, why it's slow, what's normal>
+
+## What's Normal
+- <describe patterns that look alarming but are expected>
+- <note baseline durations, sizes, error rates>
+
+## Incident History
+- <date> — <brief description and root cause>
+
+## Notes
+- <anything learned during investigations>
+```

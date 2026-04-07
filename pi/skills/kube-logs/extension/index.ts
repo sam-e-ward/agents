@@ -2,263 +2,450 @@ import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@mariozechner/pi-ai";
 import { Text } from "@mariozechner/pi-tui";
-import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { execSync } from "node:child_process";
 
-const LOGS_DIR = join(process.env.HOME ?? "/home/ubuntu", "kube-logs");
+const OS_PORT = process.env.OPENSEARCH_PORT ?? "9201";
+const OS_BASE = `https://localhost:${OS_PORT}`;
 
-function logsDir(): string {
-	return LOGS_DIR;
-}
+// ── HTTP helpers ───────────────────────────────────────────────────────
 
-function listFiles(): string[] {
-	try {
-		return readdirSync(logsDir())
-			.filter((f) => f.endsWith(".log"))
-			.sort();
-	} catch {
-		return [];
-	}
-}
-
-function filePath(file: string): string {
-	// Prevent path traversal
-	const name = basename(file);
-	return join(logsDir(), name);
-}
-
-/** Parse a timestamp from a log line. Returns seconds since midnight, or null. */
-function parseTimestamp(line: string): number | null {
-	// Match "HH:MM:SS" anywhere — handles both "2026-04-07 14:11:03,948" and "[Tue Apr 7 14:11:03 2026]"
-	const m = line.match(/(\d{2}):(\d{2}):(\d{2})/);
-	if (!m) return null;
-	return parseInt(m[1]) * 3600 + parseInt(m[2]) * 60 + parseInt(m[3]);
-}
-
-/** Parse a timestamp with millisecond precision. Returns seconds since midnight. */
-function parseTimestampMs(line: string): number | null {
-	// "2026-04-07 14:11:03,948" format (comma-separated millis)
-	const m1 = line.match(/(\d{2}):(\d{2}):(\d{2}),(\d{3})/);
-	if (m1) {
-		return parseInt(m1[1]) * 3600 + parseInt(m1[2]) * 60 + parseInt(m1[3]) + parseInt(m1[4]) / 1000;
-	}
-	// "14:11:03.948" format (dot-separated millis)
-	const m2 = line.match(/(\d{2}):(\d{2}):(\d{2})\.(\d{3})/);
-	if (m2) {
-		return parseInt(m2[1]) * 3600 + parseInt(m2[2]) * 60 + parseInt(m2[3]) + parseInt(m2[4]) / 1000;
-	}
-	// Fall back to second precision
-	return parseTimestamp(line);
-}
-
-/** Parse "HH:MM:SS" string to seconds since midnight */
-function parseTimeArg(time: string): number {
-	const parts = time.split(":");
-	return parseInt(parts[0]) * 3600 + parseInt(parts[1]) * 60 + (parts[2] ? parseInt(parts[2]) : 0);
-}
-
-/** Format seconds since midnight to HH:MM:SS.mmm */
-function formatTime(secs: number): string {
-	const h = Math.floor(secs / 3600);
-	const m = Math.floor((secs % 3600) / 60);
-	const s = secs % 60;
-	const hh = String(h).padStart(2, "0");
-	const mm = String(m).padStart(2, "0");
-	const ss = s.toFixed(3).padStart(6, "0");
-	return `${hh}:${mm}:${ss}`;
-}
-
-/** Read lines from a file within an optional time range */
-function readLines(file: string, start?: string, end?: string): string[] {
-	const content = readFileSync(filePath(file), "utf-8");
-	const lines = content.split("\n");
-
-	if (!start && !end) return lines;
-
-	const startSecs = start ? parseTimeArg(start) : 0;
-	const endSecs = end ? parseTimeArg(end) : 86400;
-
-	return lines.filter((line) => {
-		const ts = parseTimestamp(line);
-		if (ts === null) return false;
-		return ts >= startSecs && ts <= endSecs;
+function osGet(path: string, timeout_ms = 15_000): string {
+	const url = `${OS_BASE}${path}`;
+	return execSync(`curl -sk --max-time ${Math.ceil(timeout_ms / 1000)} '${url}'`, {
+		encoding: "utf-8",
+		timeout: timeout_ms + 2_000,
 	});
+}
+
+function osPost(path: string, body: object, timeout_ms = 30_000): string {
+	const url = `${OS_BASE}${path}`;
+	const json = JSON.stringify(body);
+	return execSync(`curl -sk --max-time ${Math.ceil(timeout_ms / 1000)} -H 'Content-Type: application/json' -d '${json.replace(/'/g, "\\'")}' '${url}'`, {
+		encoding: "utf-8",
+		timeout: timeout_ms + 2_000,
+	});
+}
+
+function checkConnectivity(): string | null {
+	try {
+		osGet("/_cat/health?format=json", 5_000);
+		return null;
+	} catch {
+		return [
+			`Cannot reach OpenSearch at localhost:${OS_PORT}.`,
+			"",
+			"Forward OpenSearch to localhost first. From a host with Tailscale access:",
+			`  socat TCP-LISTEN:${OS_PORT},fork,reuseaddr OPENSSL:cf-prod-opensearch:443,verify=0 &`,
+			"",
+			"Or via SSH tunnel:",
+			`  ssh -L ${OS_PORT}:cf-prod-opensearch:443 <jumphost> -N &`,
+		].join("\n");
+	}
+}
+
+// ── Environment detection ──────────────────────────────────────────────
+
+let cachedEnv: string | null = null;
+
+function detectEnvironment(): string {
+	if (cachedEnv) return cachedEnv;
+	try {
+		const raw = osGet("/_cat/indices?format=json&h=index", 5_000);
+		const indices = JSON.parse(raw) as { index: string }[];
+		// Find fluentd indices like "cf-prod-fluentd-2026.04.07"
+		for (const { index } of indices) {
+			const m = index.match(/^(.+)-fluentd-\d{4}\.\d{2}\.\d{2}$/);
+			if (m) {
+				cachedEnv = m[1];
+				return cachedEnv;
+			}
+		}
+	} catch {}
+	cachedEnv = "cf-prod";
+	return cachedEnv;
+}
+
+// ── Time helpers ───────────────────────────────────────────────────────
+
+function resolveTime(value: string): string {
+	// Relative time like "-5m", "-1h", "-30s"
+	const rel = value.match(/^-(\d+)(s|m|h|d)$/);
+	if (rel) {
+		const amount = parseInt(rel[1]);
+		const unit = rel[2];
+		const ms = { s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 }[unit]!;
+		return new Date(Date.now() - amount * ms).toISOString();
+	}
+	// Already ISO-ish
+	if (value.includes("T")) {
+		// Ensure timezone
+		if (!value.endsWith("Z") && !value.includes("+")) {
+			return value + "Z";
+		}
+		return value;
+	}
+	// Bare date
+	return value + "T00:00:00Z";
+}
+
+function indicesForRange(env: string, start: string, end: string): string {
+	const startDate = new Date(start);
+	const endDate = new Date(end);
+	const dates = new Set<string>();
+	const current = new Date(startDate);
+	while (current <= endDate) {
+		const y = current.getUTCFullYear();
+		const m = String(current.getUTCMonth() + 1).padStart(2, "0");
+		const d = String(current.getUTCDate()).padStart(2, "0");
+		dates.add(`${env}-fluentd-${y}.${m}.${d}`);
+		current.setUTCDate(current.getUTCDate() + 1);
+	}
+	return Array.from(dates).sort().join(",");
+}
+
+// ── Query builders ─────────────────────────────────────────────────────
+
+function buildSearchQuery(
+	service: string | undefined,
+	start: string,
+	end: string,
+	grep: string | undefined,
+	size: number,
+	searchAfter?: unknown[],
+): object {
+	const musts: object[] = [];
+
+	if (service) {
+		musts.push({ term: { "kubernetes.container_name.keyword": service } });
+	}
+	if (grep) {
+		musts.push({ match_phrase: { message: grep } });
+	}
+	musts.push({ range: { timestamp: { gte: start, lte: end } } });
+
+	const query: Record<string, unknown> = {
+		query: { bool: { must: musts } },
+		size,
+		sort: [{ timestamp: "asc" }, { _id: "asc" }],
+		_source: ["timestamp", "message", "kubernetes.container_name", "kubernetes.pod_name"],
+	};
+
+	if (searchAfter) {
+		query.search_after = searchAfter;
+	}
+
+	return query;
+}
+
+// ── Formatters ─────────────────────────────────────────────────────────
+
+function formatHit(hit: { _source: Record<string, unknown> }): string {
+	const src = hit._source;
+	const ts = (src.timestamp as string ?? "").replace(/T/, " ").replace(/\.\d+Z$/, "");
+	const k8s = src.kubernetes as Record<string, string> | undefined;
+	const container = k8s?.container_name ?? "";
+	const pod = k8s?.pod_name ?? "";
+	const msg = src.message as string ?? "";
+
+	// Use container name unless there are multiple pods, then include pod
+	const prefix = pod ? `${container}/${pod.split("-").pop()}` : container;
+	return `${ts}  ${prefix}  ${msg}`;
+}
+
+function truncateLines(lines: string[], max: number): { text: string; truncated: boolean } {
+	if (lines.length <= max) return { text: lines.join("\n"), truncated: false };
+	return {
+		text: lines.slice(0, max).join("\n") + `\n\n... truncated (${lines.length} total, showing first ${max})`,
+		truncated: true,
+	};
 }
 
 // ── Actions ────────────────────────────────────────────────────────────
 
-function actionList(): string {
-	const files = listFiles();
-	if (files.length === 0) {
-		return [
-			`No log files found in ${logsDir()}.`,
-			"",
-			"Dump logs from a privileged session first:",
-			"  mkdir -p ~/kube-logs",
-			"  just kube logs <resource> > ~/kube-logs/<name>.log",
-		].join("\n");
+function actionServices(): string {
+	const env = detectEnvironment();
+	// Get today's index
+	const now = new Date();
+	const y = now.getUTCFullYear();
+	const m = String(now.getUTCMonth() + 1).padStart(2, "0");
+	const d = String(now.getUTCDate()).padStart(2, "0");
+	const index = `${env}-fluentd-${y}.${m}.${d}`;
+
+	const raw = osPost(`/${index}/_search`, {
+		size: 0,
+		aggs: {
+			containers: {
+				terms: { field: "kubernetes.container_name.keyword", size: 100 },
+			},
+		},
+	}, 60_000);
+
+	const data = JSON.parse(raw);
+	const buckets = data.aggregations?.containers?.buckets ?? [];
+
+	if (buckets.length === 0) {
+		return "No containers found in today's index.";
 	}
 
-	const lines: string[] = [`${files.length} log file(s) in ${logsDir()}:`, ""];
-	for (const f of files) {
-		try {
-			const stat = statSync(join(logsDir(), f));
-			const sizeMb = (stat.size / 1024 / 1024).toFixed(1);
-			lines.push(`  ${f}  (${sizeMb} MB)`);
-		} catch {
-			lines.push(`  ${f}`);
-		}
+	const lines: string[] = [`${buckets.length} services in ${index}:`, ""];
+	for (const b of buckets) {
+		const count = (b.doc_count as number).toLocaleString();
+		lines.push(`  ${b.key}  (${count} logs)`);
 	}
 	return lines.join("\n");
 }
 
-function actionRead(file: string, start?: string, end?: string, grep?: string, limit?: number): string {
-	let lines = readLines(file, start, end);
+function actionSearch(
+	service: string | undefined,
+	start: string,
+	end: string,
+	grep: string | undefined,
+	limit: number,
+): string {
+	const env = detectEnvironment();
+	const startIso = resolveTime(start);
+	const endIso = resolveTime(end);
+	const indices = indicesForRange(env, startIso, endIso);
 
-	if (grep) {
-		const re = new RegExp(grep);
-		lines = lines.filter((l) => re.test(l));
-	}
+	// Paginate up to limit
+	const pageSize = Math.min(limit, 500);
+	const allLines: string[] = [];
+	let searchAfter: unknown[] | undefined;
 
-	const maxLines = limit ?? 500;
-	const truncated = lines.length > maxLines;
-	if (truncated) {
-		lines = lines.slice(0, maxLines);
-	}
+	while (allLines.length < limit) {
+		const query = buildSearchQuery(service, startIso, endIso, grep, pageSize, searchAfter);
+		const raw = osPost(`/${indices}/_search`, query);
+		const data = JSON.parse(raw);
+		const hits = data.hits?.hits ?? [];
 
-	let output = lines.join("\n");
-	if (truncated) {
-		output += `\n\n... truncated (showing first ${maxLines} of ${lines.length + (truncated ? 1 : 0)}+ lines). Use 'start'/'end' to narrow the time range, or 'grep' to filter.`;
-	}
-	return output || "No matching lines.";
-}
+		if (hits.length === 0) break;
 
-function actionGaps(file: string, start?: string, end?: string, minGap?: number): string {
-	const lines = readLines(file, start, end);
-	const threshold = minGap ?? 5;
-
-	let prevTs: number | null = null;
-	let prevLine: string | null = null;
-
-	const gaps: { gap: number; beforeLine: string; afterLine: string; beforeTime: string; afterTime: string }[] = [];
-
-	for (const line of lines) {
-		const ts = parseTimestampMs(line);
-		if (ts === null) continue;
-
-		if (prevTs !== null && ts - prevTs > threshold) {
-			gaps.push({
-				gap: ts - prevTs,
-				beforeLine: prevLine!,
-				afterLine: line,
-				beforeTime: formatTime(prevTs),
-				afterTime: formatTime(ts),
-			});
+		for (const hit of hits) {
+			allLines.push(formatHit(hit));
+			searchAfter = hit.sort;
 		}
 
-		prevTs = ts;
-		prevLine = line;
+		if (hits.length < pageSize) break;
 	}
 
-	if (gaps.length === 0) {
-		return `No gaps > ${threshold}s found.`;
+	if (allLines.length === 0) {
+		return "No matching logs found.";
 	}
 
-	// Sort by gap size descending
-	gaps.sort((a, b) => b.gap - a.gap);
-
-	const output: string[] = [`${gaps.length} gap(s) > ${threshold}s (sorted by duration):`, ""];
-
-	for (const g of gaps) {
-		output.push(`═══ ${g.gap.toFixed(1)}s gap (${g.beforeTime} → ${g.afterTime}) ═══`);
-		output.push(`  before: ${g.beforeLine.substring(0, 200)}`);
-		output.push(`  after:  ${g.afterLine.substring(0, 200)}`);
-		output.push("");
-	}
-
-	return output.join("\n");
+	const { text } = truncateLines(allLines, limit);
+	return `${allLines.length} log line(s):\n\n${text}`;
 }
 
-function actionTimeline(file: string, start?: string, end?: string): string {
-	const lines = readLines(file, start, end);
+function actionSlowRequests(
+	service: string | undefined,
+	start: string,
+	end: string,
+	minDurationMs: number,
+	limit: number,
+): string {
+	const env = detectEnvironment();
+	const startIso = resolveTime(start);
+	const endIso = resolveTime(end);
+	const indices = indicesForRange(env, startIso, endIso);
 
-	// Extract key events
-	const events: { time: string; event: string }[] = [];
+	// Search for uwsgi completion lines with duration
+	// Pattern: "generated N bytes in N msecs"
+	const musts: object[] = [
+		{ match_phrase: { message: "generated" } },
+		{ match_phrase: { message: "msecs" } },
+		{ range: { timestamp: { gte: startIso, lte: endIso } } },
+	];
+	if (service) {
+		musts.push({ term: { "kubernetes.container_name.keyword": service } });
+	}
 
-	for (const line of lines) {
-		const ts = parseTimestampMs(line);
-		if (ts === null) continue;
-		const time = formatTime(ts);
+	// Fetch a generous number and filter/sort client-side for duration
+	const raw = osPost(`/${indices}/_search`, {
+		query: { bool: { must: musts } },
+		size: 2000,
+		sort: [{ timestamp: "desc" }],
+		_source: ["timestamp", "message", "kubernetes.container_name", "kubernetes.pod_name"],
+	});
 
-		// Key events to extract
-		if (line.includes("Starting TrackedSearch")) {
-			const m = line.match(/Starting TrackedSearch on (\d+):(\d+)/);
-			events.push({ time, event: `TrackedSearch started: drawing=${m?.[1]} session=${m?.[2]}` });
-		} else if (line.includes("Loading file")) {
-			const m = line.match(/Loading file (\d+) for drawing (\d+)/);
-			events.push({ time, event: `Loading file ${m?.[1]} for drawing ${m?.[2]}` });
-		} else if (line.includes("duplicates during parsed svg load")) {
-			const m = line.match(/Skipped (\d+) duplicates/);
-			events.push({ time, event: `SVG parsed (${m?.[1]} duplicates skipped)` });
-		} else if (line.includes("Ignoring") && line.includes("elements")) {
-			const m = line.match(/Ignoring (\d+) elements/);
-			events.push({ time, event: `Filter rules applied: ${m?.[1]} elements ignored` });
-		} else if (line.includes("Adding") && line.includes("elements to the SearchManager")) {
-			const m = line.match(/Adding (\d+) elements/);
-			events.push({ time, event: `SearchManager initialized: ${m?.[1]} elements` });
-		} else if (line.includes("Classifier loaded")) {
-			events.push({ time, event: "Classifier loaded" });
-		} else if (line.includes("remaining unseen patterns")) {
-			const m = line.match(/(\d+) remaining unseen patterns/);
-			events.push({ time, event: `Pattern search starting: ${m?.[1]} unseen patterns` });
-		} else if (line.includes("patterns retrieved from the cache")) {
-			const m = line.match(/(\d+) patterns retrieved from the cache/);
-			if (m && parseInt(m[1]) > 0) {
-				events.push({ time, event: `${m[1]} patterns from cache` });
-			}
-		} else if (line.includes("Backend using")) {
-			const m = line.match(/Backend using (\d+) CPU cores/);
-			events.push({ time, event: `Search backend: ${m?.[1]} CPU cores` });
-		} else if (line.includes("Removing") && line.includes("patterns")) {
-			events.push({ time, event: "Pattern search complete" });
-		} else if (line.includes("Resolving clash")) {
-			// Only count these, don't list each one
-			const lastEvent = events[events.length - 1];
-			if (lastEvent?.event.startsWith("Resolving clashes:")) {
-				const m = lastEvent.event.match(/(\d+)/);
-				const count = parseInt(m![1]) + 1;
-				lastEvent.event = `Resolving clashes: ${count}`;
-			} else {
-				events.push({ time, event: "Resolving clashes: 1" });
-			}
-		} else if (line.includes("SIGPIPE")) {
-			const m = line.match(/on request ([^ ]+)/);
-			events.push({ time, event: `⚠ SIGPIPE (client disconnected): ${m?.[1] ?? ""}` });
-		} else if (line.includes("Reapplying action")) {
-			events.push({ time, event: "Reapplying saved action" });
-		} else if (line.includes("Adding drawing to cache")) {
-			events.push({ time, event: "Drawing added to cache" });
-		} else if (line.match(/\[pid: \d+.*\] (GET|POST|PUT|DELETE|OPTIONS)/)) {
-			const m = line.match(/\[pid: (\d+).*?\] (GET|POST|PUT|DELETE|OPTIONS) ([^ ]+) => generated (\d+) bytes in (\d+) msecs/);
-			if (m && m[2] !== "OPTIONS") {
-				const sizeKb = (parseInt(m[4]) / 1024).toFixed(0);
-				const durationSec = (parseInt(m[5]) / 1000).toFixed(1);
-				events.push({ time, event: `${m[2]} ${m[3]} → ${sizeKb}KB in ${durationSec}s (pid ${m[1]})` });
-			}
-		} else if (line.includes("Discipline") && line.includes("updated from")) {
-			events.push({ time, event: line.substring(line.indexOf("Discipline")).trim() });
+	const data = JSON.parse(raw);
+	const hits = data.hits?.hits ?? [];
+
+	// Parse duration from message
+	type ParsedRequest = {
+		line: string;
+		duration_ms: number;
+		method: string;
+		path: string;
+		status: string;
+		bytes: number;
+		pid: string;
+		timestamp: string;
+		container: string;
+	};
+
+	const requests: ParsedRequest[] = [];
+	const uwsgiRe = /\[pid: (\d+).*?\]\s+\S+.*?(GET|POST|PUT|DELETE|PATCH|OPTIONS)\s+(\S+)\s+=>\s+generated\s+(\d+)\s+bytes\s+in\s+(\d+)\s+msecs\s+\(HTTP\/\S+\s+(\d+)\)/;
+
+	for (const hit of hits) {
+		const msg = hit._source.message as string;
+		const m = msg.match(uwsgiRe);
+		if (!m) continue;
+
+		const duration_ms = parseInt(m[5]);
+		if (duration_ms < minDurationMs) continue;
+
+		const k8s = hit._source.kubernetes as Record<string, string> | undefined;
+		requests.push({
+			line: formatHit(hit),
+			duration_ms,
+			method: m[2],
+			path: m[3],
+			status: m[6],
+			bytes: parseInt(m[4]),
+			pid: m[1],
+			timestamp: hit._source.timestamp as string,
+			container: k8s?.container_name ?? "",
+		});
+	}
+
+	// Sort by duration descending
+	requests.sort((a, b) => b.duration_ms - a.duration_ms);
+	const top = requests.slice(0, limit);
+
+	if (top.length === 0) {
+		return `No requests found with duration >= ${minDurationMs}ms.`;
+	}
+
+	const lines: string[] = [`${top.length} slow request(s) (of ${requests.length} total >= ${minDurationMs}ms):`, ""];
+
+	for (const r of top) {
+		const durSec = (r.duration_ms / 1000).toFixed(1);
+		const sizeKb = (r.bytes / 1024).toFixed(0);
+		const ts = r.timestamp.replace(/T/, " ").replace(/\.\d+Z$/, "");
+		lines.push(`  ${durSec}s  ${r.method} ${r.path}  ${r.status}  ${sizeKb}KB  pid=${r.pid}  ${r.container}  ${ts}`);
+	}
+
+	return lines.join("\n");
+}
+
+function actionErrors(
+	service: string | undefined,
+	start: string,
+	end: string,
+	limit: number,
+): string {
+	const env = detectEnvironment();
+	const startIso = resolveTime(start);
+	const endIso = resolveTime(end);
+	const indices = indicesForRange(env, startIso, endIso);
+
+	// Search for common error patterns
+	const musts: object[] = [
+		{ range: { timestamp: { gte: startIso, lte: endIso } } },
+	];
+	if (service) {
+		musts.push({ term: { "kubernetes.container_name.keyword": service } });
+	}
+
+	// Match ERROR level, exceptions, SIGPIPE, tracebacks, HTTP 5xx
+	const shoulds: object[] = [
+		{ match_phrase: { message: "ERROR" } },
+		{ match_phrase: { message: "Exception" } },
+		{ match_phrase: { message: "Traceback" } },
+		{ match_phrase: { message: "SIGPIPE" } },
+		{ match_phrase: { message: "Internal Server Error" } },
+		{ match_phrase: { message: "HTTP/1.1 500" } },
+		{ match_phrase: { message: "HTTP/1.1 502" } },
+		{ match_phrase: { message: "HTTP/1.1 503" } },
+	];
+
+	const raw = osPost(`/${indices}/_search`, {
+		query: {
+			bool: {
+				must: musts,
+				should: shoulds,
+				minimum_should_match: 1,
+			},
+		},
+		size: limit,
+		sort: [{ timestamp: "desc" }],
+		_source: ["timestamp", "message", "kubernetes.container_name", "kubernetes.pod_name"],
+	});
+
+	const data = JSON.parse(raw);
+	const hits = data.hits?.hits ?? [];
+
+	if (hits.length === 0) {
+		return "No errors found in the given time range.";
+	}
+
+	const total = data.hits?.total?.value ?? hits.length;
+	const lines: string[] = [`${hits.length} error(s) shown (${total} total):`, ""];
+
+	for (const hit of hits) {
+		lines.push(formatHit(hit));
+	}
+
+	return lines.join("\n");
+}
+
+function actionCount(
+	service: string | undefined,
+	start: string,
+	end: string,
+	groupBy: "service" | "time" | undefined,
+): string {
+	const env = detectEnvironment();
+	const startIso = resolveTime(start);
+	const endIso = resolveTime(end);
+	const indices = indicesForRange(env, startIso, endIso);
+
+	const musts: object[] = [
+		{ range: { timestamp: { gte: startIso, lte: endIso } } },
+	];
+	if (service) {
+		musts.push({ term: { "kubernetes.container_name.keyword": service } });
+	}
+
+	const aggs: Record<string, object> = {};
+	if (groupBy === "service" || !groupBy) {
+		aggs.by_service = {
+			terms: { field: "kubernetes.container_name.keyword", size: 50 },
+		};
+	}
+	if (groupBy === "time") {
+		aggs.by_time = {
+			date_histogram: { field: "timestamp", fixed_interval: "1m" },
+		};
+	}
+
+	const raw = osPost(`/${indices}/_search`, {
+		query: { bool: { must: musts } },
+		size: 0,
+		aggs,
+	}, 60_000);
+
+	const data = JSON.parse(raw);
+	const total = data.hits?.total?.value ?? 0;
+	const lines: string[] = [`Total: ${total.toLocaleString()} logs`, ""];
+
+	if (data.aggregations?.by_service) {
+		lines.push("By service:");
+		for (const b of data.aggregations.by_service.buckets) {
+			lines.push(`  ${b.key}: ${(b.doc_count as number).toLocaleString()}`);
 		}
 	}
 
-	if (events.length === 0) {
-		return "No recognizable events in the given time range.";
+	if (data.aggregations?.by_time) {
+		lines.push("By minute:");
+		for (const b of data.aggregations.by_time.buckets) {
+			if (b.doc_count === 0) continue;
+			const ts = (b.key_as_string as string).replace(/T/, " ").replace(/\.\d+Z$/, "");
+			lines.push(`  ${ts}: ${(b.doc_count as number).toLocaleString()}`);
+		}
 	}
 
-	const output: string[] = [`${events.length} events:`, ""];
-	for (const e of events) {
-		output.push(`  ${e.time}  ${e.event}`);
-	}
-	return output.join("\n");
+	return lines.join("\n");
 }
 
 // ── Extension entry point ──────────────────────────────────────────────
@@ -268,74 +455,93 @@ export default function (pi: ExtensionAPI) {
 		name: "kube_logs",
 		label: "Kube Logs",
 		description:
-			"Read and analyze Kubernetes log files from ~/kube-logs/. Supports filtering by time range, " +
-			"finding time gaps (slow operations), and extracting structured timelines. " +
-			"Read-only — can only access pre-dumped log files.",
+			"Search and analyze Kubernetes application logs via OpenSearch. " +
+			"Supports searching by service/time/text, finding slow HTTP requests, " +
+			"listing errors, and counting logs by service or time. " +
+			"Read-only — queries OpenSearch on localhost.",
 		promptSnippet:
-			"Read and analyze Kubernetes log files. List files, read with time/grep filters, find time gaps, extract timelines.",
+			"Search Kubernetes logs via OpenSearch. Find slow requests, errors, search by service/time/text, count by service or time.",
 		promptGuidelines: [
-			"Use kube_logs for all log file analysis — do not use bash/grep/awk directly.",
-			"Start with kube_logs(action: 'list') to see available files.",
-			"Use 'gaps' action to find where time was spent in slow requests.",
-			"Use 'timeline' action for a structured overview of what happened.",
-			"Use 'read' with 'grep' for targeted searches.",
-			"Pattern IDs in Countfire logs correspond to selection_id values in the database.",
+			"Use kube_logs for all log queries — do not use bash/curl directly.",
+			"Start with kube_logs(action: 'services') to check connectivity and see available services.",
+			"Use 'slow_requests' to find long-running HTTP requests across any service.",
+			"Use 'search' with 'grep' for targeted text searches within a time window.",
+			"Use relative times like '-5m', '-1h' for recent queries.",
+			"For Countfire backend analysis, pattern IDs in logs correspond to selection_id values in the database.",
 		],
 		parameters: Type.Object({
-			action: StringEnum(["list", "read", "gaps", "timeline"] as const, {
-				description: "list: show available log files, read: read with filters, gaps: find time gaps, timeline: structured event extraction",
+			action: StringEnum(["services", "search", "slow_requests", "errors", "count"] as const, {
+				description:
+					"services: list container names, search: query logs, slow_requests: find slow HTTP requests, errors: find errors, count: count logs by group",
 			}),
-			file: Type.Optional(Type.String({ description: "Log filename (required for read/gaps/timeline)" })),
-			start: Type.Optional(Type.String({ description: "Start time filter, HH:MM:SS (inclusive)" })),
-			end: Type.Optional(Type.String({ description: "End time filter, HH:MM:SS (inclusive)" })),
-			grep: Type.Optional(Type.String({ description: "Regex filter for 'read' action" })),
-			min_gap: Type.Optional(Type.Number({ description: "Minimum gap in seconds for 'gaps' action (default: 5)" })),
-			limit: Type.Optional(Type.Number({ description: "Max lines to return for 'read' action (default: 500)" })),
+			service: Type.Optional(
+				Type.String({ description: "Container name filter (e.g. 'cf-prod-be', 'cf-prod-api')" }),
+			),
+			start: Type.Optional(
+				Type.String({
+					description: "Start time — ISO datetime or relative like '-5m', '-1h' (default: -5m)",
+				}),
+			),
+			end: Type.Optional(
+				Type.String({
+					description: "End time — ISO datetime or relative (default: now)",
+				}),
+			),
+			grep: Type.Optional(
+				Type.String({ description: "Text to match in log messages (for 'search' action)" }),
+			),
+			min_duration_ms: Type.Optional(
+				Type.Number({
+					description: "Minimum request duration in ms for 'slow_requests' (default: 5000)",
+				}),
+			),
+			group_by: Type.Optional(
+				StringEnum(["service", "time"] as const, {
+					description: "Grouping for 'count' action (default: service)",
+				}),
+			),
+			limit: Type.Optional(
+				Type.Number({ description: "Max results to return (default: 50)" }),
+			),
 		}),
 
 		async execute(_tool_call_id, params) {
+			const err = checkConnectivity();
+			if (err) {
+				return {
+					content: [{ type: "text" as const, text: err }],
+					isError: true,
+					details: {},
+				};
+			}
+
 			try {
-				if (params.action === "list") {
-					return {
-						content: [{ type: "text" as const, text: actionList() }],
-						details: {},
-					};
-				}
-
-				if (!params.file) {
-					return {
-						content: [{ type: "text" as const, text: "Error: 'file' parameter is required for this action." }],
-						isError: true,
-						details: {},
-					};
-				}
-
-				// Verify file exists
-				try {
-					statSync(filePath(params.file));
-				} catch {
-					return {
-						content: [
-							{
-								type: "text" as const,
-								text: `File not found: ${params.file}\n\nAvailable files:\n${actionList()}`,
-							},
-						],
-						isError: true,
-						details: {},
-					};
-				}
-
+				const start = params.start ?? "-5m";
+				const end = params.end ?? new Date().toISOString();
+				const limit = params.limit ?? 50;
 				let result: string;
+
 				switch (params.action) {
-					case "read":
-						result = actionRead(params.file, params.start, params.end, params.grep, params.limit);
+					case "services":
+						result = actionServices();
 						break;
-					case "gaps":
-						result = actionGaps(params.file, params.start, params.end, params.min_gap);
+					case "search":
+						result = actionSearch(params.service, start, end, params.grep, limit);
 						break;
-					case "timeline":
-						result = actionTimeline(params.file, params.start, params.end);
+					case "slow_requests":
+						result = actionSlowRequests(
+							params.service,
+							start,
+							end,
+							params.min_duration_ms ?? 5000,
+							limit,
+						);
+						break;
+					case "errors":
+						result = actionErrors(params.service, start, end, limit);
+						break;
+					case "count":
+						result = actionCount(params.service, start, end, params.group_by);
 						break;
 					default:
 						result = "Unknown action.";
@@ -343,14 +549,14 @@ export default function (pi: ExtensionAPI) {
 
 				return {
 					content: [{ type: "text" as const, text: result }],
-					details: { action: params.action, file: params.file },
+					details: { action: params.action, service: params.service },
 				};
 			} catch (e: unknown) {
 				const msg = e instanceof Error ? e.message : String(e);
 				return {
 					content: [{ type: "text" as const, text: `Error: ${msg}` }],
 					isError: true,
-					details: {},
+					details: { action: params.action },
 				};
 			}
 		},
@@ -358,12 +564,12 @@ export default function (pi: ExtensionAPI) {
 		renderCall(args, theme) {
 			let text = theme.fg("toolTitle", theme.bold("kube_logs "));
 			text += theme.fg("muted", args.action);
-			if (args.file) text += " " + theme.fg("dim", args.file);
+			if (args.service) text += " " + theme.fg("dim", args.service);
 			if (args.start || args.end) {
-				text += theme.fg("muted", ` [${args.start ?? ""}..${args.end ?? ""}]`);
+				text += theme.fg("muted", ` [${args.start ?? "-5m"}..${args.end ?? "now"}]`);
 			}
 			if (args.grep) text += theme.fg("muted", ` /${args.grep}/`);
-			if (args.min_gap) text += theme.fg("muted", ` gap>${args.min_gap}s`);
+			if (args.min_duration_ms) text += theme.fg("muted", ` >=${args.min_duration_ms}ms`);
 			return new Text(text, 0, 0);
 		},
 	});

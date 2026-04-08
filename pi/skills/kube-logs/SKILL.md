@@ -49,6 +49,14 @@ kube_logs(action: "errors", service: "cf-prod-be", start: "-15m")
 kube_logs(action: "count", start: "-1h", group_by: "service")
 ```
 
+## Scope — Logs Only
+
+**This skill is strictly for log analysis.** When investigating an issue:
+
+- **Only use the `kube_logs` tool.** Never use `ipython`, `bash`, or database queries to look up IDs, drawing names, or other context found in logs.
+- If you find drawing IDs, pattern IDs, session IDs, or other identifiers in the logs, **report them as-is**. The user knows these IDs are visible in the logs — that's why they're asking.
+- Do not attempt to "enrich" log data by querying a database or running code. The answer must come entirely from the logs.
+
 ## Workflow
 
 ### Step 1 — Check connectivity

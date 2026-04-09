@@ -35,11 +35,23 @@ vm_labels(action: "values", label: "node")
 vm_labels(action: "series", match: "node_memory_MemTotal_bytes", limit: 5)
 ```
 
+## ⚠️ MANDATORY: Load Knowledge BEFORE Any Investigation
+
+**You MUST load the environment knowledge file before running any investigative queries.** This is not optional. Skipping this step leads to misinterpreting normal behaviour as problems, using wrong label names, and wasting queries on already-known information.
+
+1. Query the cluster name: `vm_labels(action: "values", label: "cluster")`
+2. Read `~/.pi/vm-knowledge/<cluster-name>.md` using the `read` tool
+3. Only then proceed to answer the user's question
+
+If the knowledge file doesn't exist yet, run the discovery queries in Step 2 below to create it first.
+
+---
+
 ## Workflow
 
 Follow this sequence every time the skill is invoked:
 
-### Step 1 — Check connectivity
+### Step 1 — Check connectivity and load knowledge
 
 ```
 vm_query(query: "up", range: false)
@@ -47,9 +59,7 @@ vm_query(query: "up", range: false)
 
 If this fails, the tool will report the error with setup instructions. **Stop and relay those to the user.**
 
-### Step 2 — Load or create environment knowledge
-
-Knowledge files are stored at `~/.pi/vm-knowledge/<cluster-name>.md`.
+Then **immediately** identify the environment and load knowledge:
 
 1. **Identify the environment**: query the cluster label:
    ```
@@ -57,16 +67,20 @@ Knowledge files are stored at `~/.pi/vm-knowledge/<cluster-name>.md`.
    ```
    This returns the cluster name(s). If there's exactly one, use it. If multiple, ask the user which one.
 
-2. **Load knowledge**: read `~/.pi/vm-knowledge/<cluster-name>.md` if it exists. This contains previously discovered information about the environment — node types, namespaces, useful metrics, label conventions, **workload characteristics, and known baselines**. Pay close attention to these — they tell you what is normal for this environment.
+2. **Load knowledge**: use the `read` tool to read `~/.pi/vm-knowledge/<cluster-name>.md`. This contains previously discovered information about the environment — node types, namespaces, useful metrics, label conventions, **workload characteristics, and known baselines**. Pay close attention to these — they tell you what is normal for this environment. **Do not proceed to investigation without reading this file.**
 
-3. **First time? Run discovery** (only if no knowledge file exists):
-   ```
-   vm_labels(action: "values", label: "namespace")
-   vm_labels(action: "values", label: "node")
-   vm_labels(action: "values", label: "job")
-   vm_query(query: "count by (node, node_kubernetes_io_instance_type) (node_uname_info)")
-   ```
-   Then create the knowledge file with what was found. Use the template below.
+### Step 2 — First-time discovery (only if no knowledge file exists)
+
+If the knowledge file does not exist, run discovery:
+
+```
+vm_labels(action: "values", label: "namespace")
+vm_labels(action: "values", label: "node")
+vm_labels(action: "values", label: "job")
+vm_query(query: "count by (node, node_kubernetes_io_instance_type) (node_uname_info)")
+```
+
+Then create the knowledge file with what was found. Use the template below.
 
 ### Step 3 — Investigate the user's question
 

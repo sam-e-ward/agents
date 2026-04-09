@@ -69,9 +69,21 @@ opensearch(action: "count", start: "-1h", group_by: "service")
 - If you find drawing IDs, pattern IDs, session IDs, or other identifiers in the logs, **report them as-is**. The user knows these IDs are visible in the logs — that's why they're asking.
 - Do not attempt to "enrich" log data by querying a database or running code. The answer must come entirely from the logs.
 
+## ⚠️ MANDATORY: Load Knowledge BEFORE Any Investigation
+
+**You MUST load the environment knowledge file before running any investigative queries.** This is not optional. Skipping this step leads to misinterpreting normal behaviour as problems, missing known patterns, and asking questions already answered in the knowledge file.
+
+1. Run `opensearch(action: "services")` to check connectivity and identify the environment
+2. Read `~/.pi/opensearch-knowledge/<environment>.md` using the `read` tool
+3. Only then proceed to answer the user's question
+
+If the knowledge file doesn't exist yet, run the discovery queries in Step 2 below to create it first.
+
+---
+
 ## Workflow
 
-### Step 1 — Check connectivity
+### Step 1 — Check connectivity and load knowledge
 
 ```
 opensearch(action: "services")
@@ -79,20 +91,22 @@ opensearch(action: "services")
 
 If this fails because no host is configured, ask the user for the Tailscale hostname and use `set_host` to save it. If it fails because the host is unreachable, tell the user to check their Tailscale connection and stop.
 
-### Step 2 — Load or create environment knowledge
-
-Knowledge files are stored at `~/.pi/opensearch-knowledge/<environment>.md`.
+Then **immediately** load the knowledge file:
 
 1. **Identify the environment**: the `services` action auto-detects the environment from OpenSearch index names (e.g. `cf-prod` from `cf-prod-fluentd-2026.04.07`).
 
-2. **Load knowledge**: read `~/.pi/opensearch-knowledge/<environment>.md` if it exists. This contains previously discovered information about the environment — service names, log formats, request flows, known slow paths, and what is normal. Pay close attention to these — they prevent you from misinterpreting expected behaviour as problems.
+2. **Load knowledge**: use the `read` tool to read `~/.pi/opensearch-knowledge/<environment>.md`. This contains previously discovered information about the environment — service names, log formats, request flows, known slow paths, and what is normal. Pay close attention to these — they prevent you from misinterpreting expected behaviour as problems. **Do not proceed to investigation without reading this file.**
 
-3. **First time? Run discovery** (only if no knowledge file exists):
-   ```
-   opensearch(action: "services")
-   opensearch(action: "count", start: "-1h", group_by: "service")
-   ```
-   Then create the knowledge file with what was found. Use the template below.
+### Step 2 — First-time discovery (only if no knowledge file exists)
+
+If the knowledge file does not exist, run discovery:
+
+```
+opensearch(action: "services")
+opensearch(action: "count", start: "-1h", group_by: "service")
+```
+
+Then create the knowledge file with what was found. Use the template below.
 
 ### Step 3 — Investigate the user's question
 

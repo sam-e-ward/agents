@@ -57,12 +57,12 @@ Long-running processes never return control, causing the agent to hang indefinit
    - Read the diff (`git diff` and `git diff --staged`)
    - Summarise the changes and ask: **"There are existing uncommitted changes that [summary]. Commit these and continue?"**
    - If the user says **no**, stop work entirely. Do not proceed.
-   - If the user says **yes**, stage and commit those changes with a plain english message, then continue with the requested work.
+   - If the user says **yes**, stage and commit those changes with an `AI:` prefixed plain english message, then continue with the requested work.
 
 ### After completing work
 
 1. Stage all changes related to the work you just did.
-2. Commit with a short, plain english description of what was done. No prefixes, no conventional commits — just a clear sentence.
+2. Commit with a message starting with `AI:` followed by a short, plain english description of what was done. No conventional commits — just the `AI:` prefix and a clear sentence.
 3. Tell the user what was committed.
 
 ### On follow-up prompts

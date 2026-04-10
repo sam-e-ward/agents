@@ -7,16 +7,18 @@ Create a git commit for the current changes using a plain english description.
 
 ## Format
 
-A short, clear sentence describing what was done. No prefixes, no conventional commits format, no trailing period.
+Start with `AI:` followed by a short, clear sentence describing what was done. No conventional commits format, no trailing period.
 
-Good: `Add user authentication with session tokens`
-Good: `Fix search returning duplicate results`
+Good: `AI: Add user authentication with session tokens`
+Good: `AI: Fix search returning duplicate results`
 Bad: `feat(auth): add user authentication`
 Bad: `misc changes`
+Bad: `Add user authentication` (missing AI: prefix)
 
 ## Notes
 
-- Do NOT include prefixes like `feat:`, `fix:`, `chore:`, etc.
+- Always start the message with `AI:` prefix.
+- Do NOT include other prefixes like `feat:`, `fix:`, `chore:`, etc.
 - Do NOT add sign-offs (no `Signed-off-by`).
 - Only commit; do NOT push.
 - If it is unclear whether a file should be included, ask the user which files to commit.

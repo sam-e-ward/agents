@@ -90,7 +90,7 @@ Use targeted PromQL queries from the cookbook below. Iterate: run a query, inter
 
 ### Step 4 — Update knowledge
 
-If you discovered anything new (a useful metric, a label pattern, a node group, workload baseline, traffic pattern, incident learnings), **append it to the knowledge file** so future sessions benefit.
+If you discovered anything new that is **generic to the environment** (a useful metric, a label pattern, a node group, workload baseline, traffic pattern), **append it to the knowledge file** so future sessions benefit. Do not record specific incidents — only generic learnings about the environment's normal behaviour and characteristics.
 
 ## Investigation Principles
 
@@ -222,9 +222,6 @@ scrape_duration_seconds{job="node-exporter"}
 
 ## Useful Metrics
 - <metric_name> — <what it measures>
-
-## Incident History
-- <date> — <brief description and root cause>
 
 ## Notes
 - <anything learned during investigations>

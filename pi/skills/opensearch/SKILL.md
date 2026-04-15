@@ -178,7 +178,7 @@ opensearch(action: "search", service: "cf-prod-be", start: "-1h", grep: "some_en
 
 ### Step 4 — Update knowledge
 
-If you discovered anything new about the environment (a service's log format, request flow patterns, what's normal, known slow paths, incident learnings), **append it to the knowledge file** so future sessions benefit.
+If you discovered anything new that is **generic to the environment** (a service's log format, request flow patterns, what's normal, known slow paths), **append it to the knowledge file** so future sessions benefit. Do not record specific incidents — only generic learnings about the environment's normal behaviour and characteristics.
 
 ## Analysis Tips
 
@@ -231,9 +231,6 @@ opensearch_host: <tailscale-hostname>
 ## What's Normal
 - <describe patterns that look alarming but are expected>
 - <note baseline durations, sizes, error rates>
-
-## Incident History
-- <date> — <brief description and root cause>
 
 ## Notes
 - <anything learned during investigations>

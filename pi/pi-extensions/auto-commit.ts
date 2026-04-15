@@ -24,9 +24,9 @@ export default function (pi: ExtensionAPI) {
 		for (const msg of event.messages) {
 			if (msg.role === "assistant" && Array.isArray(msg.content)) {
 				for (const block of msg.content) {
-					if (block.type === "tool_use") {
+					if (block.type === "tool_use" || block.type === "toolCall") {
 						if (block.name === "write" || block.name === "edit") {
-							const filePath = block.input?.path;
+							const filePath = block.input?.path ?? block.arguments?.path;
 							if (typeof filePath === "string") {
 								editedFiles.add(resolve(ctx.cwd, filePath));
 							}
@@ -168,7 +168,25 @@ export default function (pi: ExtensionAPI) {
 }
 
 function buildCommitMessage(messages: Array<{ role: string; content: unknown }>): string {
-	let summary = "";
+	// Collect edited file paths for a fallback summary
+	const editedFiles: string[] = [];
+	for (const msg of messages) {
+		if ((msg as any).role === "assistant" && Array.isArray(msg.content)) {
+			for (const block of msg.content as any[]) {
+				if ((block.type === "tool_use" || block.type === "toolCall") &&
+					(block.name === "write" || block.name === "edit")) {
+					const filePath = block.input?.path ?? block.arguments?.path;
+					if (typeof filePath === "string") {
+						// Use just the filename, not full path
+						editedFiles.push(filePath.split("/").pop()!);
+					}
+				}
+			}
+		}
+	}
+
+	// Find the last assistant text
+	let rawText = "";
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const msg = messages[i];
 		if (msg.role === "assistant" && Array.isArray(msg.content)) {
@@ -182,16 +200,30 @@ function buildCommitMessage(messages: Array<{ role: string; content: unknown }>)
 					typeof block.text === "string" &&
 					block.text.trim()
 				) {
-					summary = block.text.trim().split("\n")[0];
+					rawText = block.text.trim();
 					break;
 				}
 			}
-			if (summary) break;
+			if (rawText) break;
 		}
 	}
 
+	// Clean up: take first line, strip markdown formatting
+	let summary = rawText.split("\n")[0]
+		.replace(/[`*_~#>\[\]]/g, "")  // strip markdown chars
+		.replace(/\s+/g, " ")           // collapse whitespace
+		.trim();
+
 	if (!summary || summary.length > 72) {
-		summary = summary ? summary.slice(0, 69) + "..." : "Update files";
+		if (summary) {
+			summary = summary.slice(0, 69) + "...";
+		} else if (editedFiles.length > 0) {
+			summary = `Update ${editedFiles.join(", ")}`;
+			if (summary.length > 72) summary = summary.slice(0, 69) + "...";
+		} else {
+			summary = "Update files";
+		}
 	}
+
 	return `AI: ${summary}`;
 }

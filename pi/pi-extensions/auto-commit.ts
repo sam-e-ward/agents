@@ -81,7 +81,8 @@ export default function (pi: ExtensionAPI) {
 			if (!diff.trim()) continue;
 
 			// Generate commit message from the diff using an LLM
-			const commitMessage = await generateCommitMessage(pi, repoRoot);
+			const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+			const commitMessage = await generateCommitMessage(pi, repoRoot, currentModel);
 
 			// Check if we have a previous auto-commit for this repo
 			const prev = lastAutoCommit.get(repoRoot);
@@ -181,7 +182,11 @@ export default function (pi: ExtensionAPI) {
 	});
 }
 
-async function generateCommitMessage(pi: ExtensionAPI, repoRoot: string): Promise<string> {
+async function generateCommitMessage(
+	pi: ExtensionAPI,
+	repoRoot: string,
+	currentModel: { provider: string; id: string } | undefined,
+): Promise<string> {
 	// Get the staged diff (truncated to avoid overwhelming the model)
 	const { stdout: fullDiff } = await pi.exec("git", ["-C", repoRoot, "diff", "--cached"], {
 		timeout: 5000,
@@ -201,22 +206,25 @@ async function generateCommitMessage(pi: ExtensionAPI, repoRoot: string): Promis
 
 	const prompt = `${stat.trim()}\n\n${diff}`;
 
+	// Build args for pi in print mode
+	const args = [
+		"-p",
+		"--no-tools",
+		"--no-session",
+		"--no-extensions",
+		"--no-skills",
+		"--system-prompt", COMMIT_MSG_PROMPT,
+	];
+
+	// Use the current session's model so we don't assume any provider is configured
+	if (currentModel) {
+		args.push("--model", `${currentModel.provider}/${currentModel.id}`);
+	}
+
+	args.push(prompt);
+
 	try {
-		// Use pi in print mode with a fast model, no tools, no session, no extensions
-		const { stdout, code } = await pi.exec(
-			"pi",
-			[
-				"-p",
-				"--no-tools",
-				"--no-session",
-				"--no-extensions",
-				"--no-skills",
-				"--model", "gemini-2.0-flash",
-				"--system-prompt", COMMIT_MSG_PROMPT,
-				prompt,
-			],
-			{ timeout: 15000 },
-		);
+		const { stdout, code } = await pi.exec("pi", args, { timeout: 15000 });
 
 		if (code === 0 && stdout.trim()) {
 			let msg = stdout.trim();

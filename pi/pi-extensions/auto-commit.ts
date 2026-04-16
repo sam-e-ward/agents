@@ -26,9 +26,27 @@ Rules:
 - No conventional commit prefixes (no feat:, fix:, etc.)
 - If multiple things changed, summarize the overall intent`;
 
+const CLASSIFY_PROMPT = `You decide whether new code changes should AMEND a previous commit or be a NEW commit.
+
+You'll receive:
+- The previous commit message
+- The user's prompt that triggered the new changes
+
+Rules:
+- Output a single word: AMEND, NEW, or UNCERTAIN
+- AMEND: the user is correcting, fixing, or refining what was just done (e.g. "that's not quite right", "fix the typo", "actually use X instead", "that didn't work", "try again", "close but change Y")
+- NEW: the user is moving on to a different task or building on top of what's done (e.g. "ok great, now do C", "next add tests", "also update the docs", "let's move on to X")
+- UNCERTAIN: the prompt is ambiguous and could go either way
+- When in doubt, say UNCERTAIN`;
+
 export default function (pi: ExtensionAPI) {
 	// Track last auto-commit per repo: repoRoot -> { sha, message }
 	const lastAutoCommit = new Map<string, { sha: string; message: string }>();
+	let lastUserPrompt = "";
+
+	pi.on("before_agent_start", async (event) => {
+		lastUserPrompt = event.prompt;
+	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		// Find the git repo root for the cwd
@@ -75,11 +93,23 @@ export default function (pi: ExtensionAPI) {
 				{ timeout: 5000 },
 			);
 			if (headSha.trim() === prev.sha) {
-				const choice = await ctx.ui.select("Previous auto-commit exists for this repo", [
-					"Amend — fold into previous commit (fix)",
-					"New commit — keep previous, add another (build on it)",
-				]);
-				amend = choice?.startsWith("Amend") ?? false;
+				// Ask the LLM to classify the intent
+				const classification = await classifyAmendOrNew(
+					pi, prev.message, lastUserPrompt, currentModel,
+				);
+
+				if (classification === "AMEND") {
+					amend = true;
+				} else if (classification === "NEW") {
+					amend = false;
+				} else {
+					// UNCERTAIN or failed — fall back to user prompt
+					const choice = await ctx.ui.select("Previous auto-commit exists for this repo", [
+						"Amend — fold into previous commit (fix)",
+						"New commit — keep previous, add another (build on it)",
+					]);
+					amend = choice?.startsWith("Amend") ?? false;
+				}
 			}
 		}
 
@@ -157,6 +187,45 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
 		lastAutoCommit.clear();
 	});
+}
+
+async function classifyAmendOrNew(
+	pi: ExtensionAPI,
+	prevCommitMessage: string,
+	userPrompt: string,
+	currentModel: { provider: string; id: string } | undefined,
+): Promise<"AMEND" | "NEW" | "UNCERTAIN"> {
+	if (!userPrompt.trim()) return "UNCERTAIN";
+
+	const prompt = `Previous commit: ${prevCommitMessage}\nUser prompt: ${userPrompt}`;
+
+	const args = [
+		"-p",
+		"--no-tools",
+		"--no-session",
+		"--no-extensions",
+		"--no-skills",
+		"--system-prompt", CLASSIFY_PROMPT,
+	];
+
+	if (currentModel) {
+		args.push("--model", `${currentModel.provider}/${currentModel.id}`);
+	}
+
+	args.push(prompt);
+
+	try {
+		const { stdout, code } = await pi.exec("pi", args, { timeout: 10000 });
+		if (code === 0) {
+			const result = stdout.trim().toUpperCase();
+			if (result.includes("AMEND")) return "AMEND";
+			if (result.includes("NEW")) return "NEW";
+		}
+	} catch {
+		// Fall through
+	}
+
+	return "UNCERTAIN";
 }
 
 async function generateCommitMessage(

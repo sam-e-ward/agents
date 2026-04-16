@@ -89,6 +89,51 @@ echo "=== Linking skills ==="
 symlink_dir "$REPO_DIR/skills" "$OC_CONFIG_DIR/skills"
 
 echo ""
+echo "=== Installing plugins ==="
+PLUGIN_DIR="$REPO_DIR/plugins"
+if [ -d "$PLUGIN_DIR" ]; then
+  # Install plugin dependencies
+  if [ -f "$PLUGIN_DIR/package.json" ]; then
+    echo "  Installing plugin dependencies..."
+    (cd "$PLUGIN_DIR" && npm install --silent 2>&1 | tail -1)
+  fi
+
+  # Register plugins in global config
+  OC_GLOBAL_CONFIG="$OC_CONFIG_DIR/config.json"
+  PLUGIN_PATH="$PLUGIN_DIR/auto-commit.ts"
+
+  if [ -f "$PLUGIN_PATH" ]; then
+    if [ -f "$OC_GLOBAL_CONFIG" ]; then
+      # Check if plugin is already registered
+      if grep -qF "$PLUGIN_PATH" "$OC_GLOBAL_CONFIG" 2>/dev/null; then
+        echo "  ✓ auto-commit plugin already registered in $OC_GLOBAL_CONFIG"
+      else
+        # Add plugin to existing config using node for safe JSON manipulation
+        node -e "
+          const fs = require('fs');
+          const cfg = JSON.parse(fs.readFileSync('$OC_GLOBAL_CONFIG', 'utf8'));
+          if (!Array.isArray(cfg.plugin)) cfg.plugin = [];
+          cfg.plugin.push('$PLUGIN_PATH');
+          fs.writeFileSync('$OC_GLOBAL_CONFIG', JSON.stringify(cfg, null, 2) + '\n');
+        "
+        echo "  ✓ Added auto-commit plugin to $OC_GLOBAL_CONFIG"
+      fi
+    else
+      # Create config with plugin
+      mkdir -p "$(dirname "$OC_GLOBAL_CONFIG")"
+      cat > "$OC_GLOBAL_CONFIG" <<EOF
+{
+  "plugin": ["$PLUGIN_PATH"]
+}
+EOF
+      echo "  ✓ Created $OC_GLOBAL_CONFIG with auto-commit plugin"
+    fi
+  fi
+else
+  echo "  ⚠ Plugin directory not found: $PLUGIN_DIR"
+fi
+
+echo ""
 echo "=== Configuring shell ==="
 ZSHRC_LOCAL="$HOME/.zshrc.local"
 OC_SHELL_MARKER="# opencode: reset terminal after exit"

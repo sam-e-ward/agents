@@ -1,8 +1,8 @@
 /**
  * Auto-Commit Extension
  *
- * After every agent response, checks if any files were written/edited,
- * finds which git repos they belong to, and auto-commits with an "AI:" prefix.
+ * After every agent response, checks for uncommitted changes in the cwd's
+ * git repo and auto-commits them with an "AI:" prefix.
  *
  * Uses a lightweight LLM call (via `pi -p`) to generate a proper commit message
  * from the staged diff.
@@ -14,7 +14,6 @@
  */
 
 import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
-import { resolve, dirname } from "node:path";
 
 const COMMIT_MSG_PROMPT = `You are a commit message generator. Given a git diff, write a single-line commit message.
 
@@ -31,124 +30,79 @@ export default function (pi: ExtensionAPI) {
 	// Track last auto-commit per repo: repoRoot -> { sha, message }
 	const lastAutoCommit = new Map<string, { sha: string; message: string }>();
 
-	pi.on("agent_end", async (event, ctx) => {
-		// Collect file paths from write/edit tool calls in this agent run
-		const editedFiles = new Set<string>();
-		let bashWasUsed = false;
+	pi.on("agent_end", async (_event, ctx) => {
+		// Find the git repo root for the cwd
+		const { stdout: repoRootRaw, code: repoCode } = await pi.exec(
+			"git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"],
+			{ timeout: 5000 },
+		);
+		if (repoCode !== 0) return; // not a git repo
 
-		for (const msg of event.messages) {
-			if (msg.role === "assistant" && Array.isArray(msg.content)) {
-				for (const block of msg.content) {
-					if (block.type === "tool_use" || block.type === "toolCall") {
-						if (block.name === "write" || block.name === "edit") {
-							const filePath = block.input?.path ?? block.arguments?.path;
-							if (typeof filePath === "string") {
-								editedFiles.add(resolve(ctx.cwd, filePath));
-							}
-						} else if (block.name === "bash" || block.name === "subagent") {
-							bashWasUsed = true;
-						}
-					}
-				}
-			}
-		}
+		const repoRoot = repoRootRaw.trim();
 
-		// When bash/subagent was used, scan for untracked and modified files
-		// that the agent may have created outside of write/edit tool calls
-		if (bashWasUsed) {
-			const { stdout: statusOut, code: statusCode } = await pi.exec(
-				"git", ["-C", ctx.cwd, "status", "--porcelain"],
+		// Check for any uncommitted changes (untracked, modified, staged)
+		const { stdout: status } = await pi.exec(
+			"git", ["-C", repoRoot, "status", "--porcelain"],
+			{ timeout: 5000 },
+		);
+		if (!status.trim()) return; // nothing to commit
+
+		// Stage everything
+		await pi.exec("git", ["-C", repoRoot, "add", "-A"], { timeout: 5000 });
+
+		// Verify there's actually something staged (in case .gitignore filtered it all)
+		const { stdout: stagedStat } = await pi.exec(
+			"git", ["-C", repoRoot, "diff", "--cached", "--stat"],
+			{ timeout: 5000 },
+		);
+		if (!stagedStat.trim()) return;
+
+		// Count files for the notification
+		const fileCount = stagedStat.split("\n").filter((l) => l.includes("|")).length;
+
+		// Generate commit message from the diff using an LLM
+		const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
+		const commitMessage = await generateCommitMessage(pi, repoRoot, currentModel);
+
+		// Check if we have a previous auto-commit for this repo
+		const prev = lastAutoCommit.get(repoRoot);
+		let amend = false;
+
+		if (prev && ctx.hasUI) {
+			// Verify the previous auto-commit is still HEAD
+			const { stdout: headSha } = await pi.exec(
+				"git", ["-C", repoRoot, "rev-parse", "HEAD"],
 				{ timeout: 5000 },
 			);
-			if (statusCode === 0 && statusOut.trim()) {
-				for (const line of statusOut.split("\n")) {
-					if (!line.trim()) continue;
-					const status = line.slice(0, 2);
-					const filePath = line.slice(3).trim();
-					// Pick up untracked (??) and modified ( M / M) files
-					if (status === "??" || status.includes("M") || status === " A" || status === "A ") {
-						editedFiles.add(resolve(ctx.cwd, filePath));
-					}
-				}
+			if (headSha.trim() === prev.sha) {
+				const choice = await ctx.ui.select("Previous auto-commit exists for this repo", [
+					"Amend — fold into previous commit (fix)",
+					"New commit — keep previous, add another (build on it)",
+				]);
+				amend = choice?.startsWith("Amend") ?? false;
 			}
 		}
 
-		if (editedFiles.size === 0) return;
+		const commitArgs = ["-C", repoRoot, "commit"];
+		if (amend) commitArgs.push("--amend");
+		commitArgs.push("-m", commitMessage);
 
-		// Group files by git repo root
-		const repoFiles = new Map<string, string[]>();
+		const { code } = await pi.exec("git", commitArgs, { timeout: 10000 });
 
-		for (const file of editedFiles) {
-			const { stdout, code } = await pi.exec("git", ["-C", dirname(file), "rev-parse", "--show-toplevel"], {
-				timeout: 5000,
-			});
-			if (code !== 0) continue;
+		if (code === 0) {
+			// Record this auto-commit
+			const { stdout: newSha } = await pi.exec(
+				"git", ["-C", repoRoot, "rev-parse", "HEAD"],
+				{ timeout: 5000 },
+			);
+			lastAutoCommit.set(repoRoot, { sha: newSha.trim(), message: commitMessage });
 
-			const root = stdout.trim();
-			if (!repoFiles.has(root)) repoFiles.set(root, []);
-			repoFiles.get(root)!.push(file);
-		}
-
-		if (repoFiles.size === 0) return;
-
-		for (const [repoRoot, files] of repoFiles) {
-			// Stage only the files we touched
-			for (const file of files) {
-				await pi.exec("git", ["-C", repoRoot, "add", file], { timeout: 5000 });
-			}
-
-			// Check if there's anything staged
-			const { stdout: diff } = await pi.exec("git", ["-C", repoRoot, "diff", "--cached", "--stat"], {
-				timeout: 5000,
-			});
-			if (!diff.trim()) continue;
-
-			// Generate commit message from the diff using an LLM
-			const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
-			const commitMessage = await generateCommitMessage(pi, repoRoot, currentModel);
-
-			// Check if we have a previous auto-commit for this repo
-			const prev = lastAutoCommit.get(repoRoot);
-			let amend = false;
-
-			if (prev && ctx.hasUI) {
-				// Verify the previous auto-commit is still HEAD
-				const { stdout: headSha } = await pi.exec("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-					timeout: 5000,
-				});
-				if (headSha.trim() === prev.sha) {
-					const choice = await ctx.ui.select("Previous auto-commit exists for this repo", [
-						"Amend — fold into previous commit (fix)",
-						"New commit — keep previous, add another (build on it)",
-					]);
-					amend = choice?.startsWith("Amend") ?? false;
-				}
-			}
-
-			let commitArgs: string[];
-			if (amend) {
-				commitArgs = ["-C", repoRoot, "commit", "--amend", "-m", commitMessage];
-			} else {
-				commitArgs = ["-C", repoRoot, "commit", "-m", commitMessage];
-			}
-
-			const { code, stdout: commitOut } = await pi.exec("git", commitArgs, { timeout: 10000 });
-
-			if (code === 0) {
-				// Record this auto-commit
-				const { stdout: newSha } = await pi.exec("git", ["-C", repoRoot, "rev-parse", "HEAD"], {
-					timeout: 5000,
-				});
-				lastAutoCommit.set(repoRoot, { sha: newSha.trim(), message: commitMessage });
-
-				if (ctx.hasUI) {
-					const fileCount = files.length;
-					const verb = amend ? "Amended" : "Auto-committed";
-					ctx.ui.notify(
-						`${verb} ${fileCount} file${fileCount > 1 ? "s" : ""} in ${repoRoot}: ${commitMessage}`,
-						"info",
-					);
-				}
+			if (ctx.hasUI) {
+				const verb = amend ? "Amended" : "Auto-committed";
+				ctx.ui.notify(
+					`${verb} ${fileCount} file${fileCount > 1 ? "s" : ""} in ${repoRoot}: ${commitMessage}`,
+					"info",
+				);
 			}
 		}
 	});

@@ -17,6 +17,7 @@ export default function (pi: ExtensionAPI) {
 	let contextInfo: ContextInfo | null = null;
 	let summary: string | null = null;
 	let injected = false;
+	let skipContext = false;
 
 	async function git(...args: string[]): Promise<{ stdout: string; code: number }> {
 		const result = await pi.exec("git", args, { timeout: 10000 });
@@ -215,10 +216,23 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
+	pi.registerCommand("abandon", {
+		description: "Start a fresh session without branch context",
+		handler: async (_args, ctx) => {
+			skipContext = true;
+			await ctx.newSession();
+		},
+	});
+
 	pi.on("session_start", async (_event, ctx) => {
 		contextInfo = null;
 		summary = null;
 		injected = false;
+
+		if (skipContext) {
+			skipContext = false;
+			return;
+		}
 
 		try {
 			contextInfo = await computeContextInfo();

@@ -60,5 +60,7 @@ for arg in "$@"; do
     prev="$arg"
 done
 
-# Dispatch to uv run python
+# Dispatch to uv run python, stripping ourselves from PATH to avoid infinite recursion
+SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | paste -sd:)
 exec uv run python "$@"

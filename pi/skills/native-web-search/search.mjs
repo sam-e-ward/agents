@@ -69,11 +69,13 @@ function parseArgs(argv) {
 
 function usage() {
 	return `Usage:
-  node search.mjs "<query>" [--purpose "<why>"] [--provider openai-codex|anthropic] [--model <id>] [--json]
+  node search.mjs "<query>" [--purpose "<why>"] [--provider openai-codex|anthropic|openrouter] [--model <id>] [--json]
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
   node search.mjs "HTTP/3 browser support 2026" --provider openai-codex
+  node search.mjs "vite 7 breaking changes" --provider openrouter
+  node search.mjs "react 19 features" --provider openrouter --model openai/gpt-4o
   node search.mjs "vite 7 breaking changes" --json`;
 }
 
@@ -120,6 +122,7 @@ function normalizeProvider(provider) {
 	const p = String(provider).toLowerCase().trim();
 	if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
 	if (p.includes("codex") || p === "openai" || p.startsWith("openai")) return "openai-codex";
+	if (p.includes("openrouter")) return "openrouter";
 	return undefined;
 }
 
@@ -132,8 +135,9 @@ function pickProvider(argProvider, settings, auth) {
 
 	if (auth?.["openai-codex"]) return "openai-codex";
 	if (auth?.anthropic) return "anthropic";
+	if (auth?.openrouter) return "openrouter";
 
-	throw new Error("Could not determine provider. Pass --provider openai-codex|anthropic");
+	throw new Error("Could not determine provider. Pass --provider openai-codex|anthropic|openrouter");
 }
 
 function decodeJwtAccountId(jwt) {
@@ -231,6 +235,7 @@ function pickFastModel(provider, requestedModel, piAi) {
 	if (!Array.isArray(models) || models.length === 0) {
 		if (requestedModel) return { id: requestedModel, baseUrl: undefined };
 		if (provider === "openai-codex") return { id: "gpt-5.1-codex-mini", baseUrl: "https://chatgpt.com/backend-api" };
+		if (provider === "openrouter") return { id: "openai/gpt-4o", baseUrl: "https://openrouter.ai/api/v1" };
 		return { id: "claude-haiku-4-5", baseUrl: "https://api.anthropic.com" };
 	}
 
@@ -243,7 +248,9 @@ function pickFastModel(provider, requestedModel, piAi) {
 	const preferredIds =
 		provider === "openai-codex"
 			? ["gpt-5.1-codex-mini", "gpt-5.3-codex-spark", "gpt-5.1"]
-			: ["claude-haiku-4-5", "claude-3-5-haiku-latest", "claude-3-5-haiku-20241022"];
+			: provider === "openrouter"
+				? ["openai/gpt-4o", "openai/gpt-4o-mini", "perplexity/sonar", "perplexity/sonar-pro"]
+				: ["claude-haiku-4-5", "claude-3-5-haiku-latest", "claude-3-5-haiku-20241022"];
 
 	for (const id of preferredIds) {
 		const found = models.find((m) => m.id === id);
@@ -488,6 +495,99 @@ async function runAnthropicSearch({ model, apiKey, query, purpose, timeoutMs }) 
 	return text;
 }
 
+async function runOpenRouterSearch({ model, apiKey, query, purpose, timeoutMs, baseUrl }) {
+	const endpoint = `${(baseUrl || "https://openrouter.ai/api/v1").replace(/\/+$/, "")}/responses`;
+
+	const body = {
+		model,
+		store: false,
+		stream: true,
+		instructions: buildSystemPrompt(),
+		input: [{ role: "user", content: buildUserPrompt(query, purpose) }],
+		tools: [{ type: "web_search" }],
+		tool_choice: "auto",
+	};
+
+	const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+
+	const res = await fetch(endpoint, {
+		method: "POST",
+		headers: {
+			authorization: `Bearer ${apiKey}`,
+			"content-type": "application/json",
+			accept: "text/event-stream",
+			"HTTP-Referer": "https://github.com/earendil-works/pi-coding-agent",
+			"X-Title": "pi-native-web-search",
+		},
+		body: JSON.stringify(body),
+		signal,
+	});
+
+	if (!res.ok) {
+		const detail = await res.text();
+		throw new Error(`OpenRouter request failed (${res.status}): ${detail}`);
+	}
+	if (!res.body) {
+		throw new Error("OpenRouter response had no body");
+	}
+
+	const reader = res.body.getReader();
+	const decoder = new TextDecoder();
+	let buffer = "";
+	let text = "";
+	let fallbackText = "";
+
+	while (true) {
+		const { done, value } = await reader.read();
+		if (done) break;
+		buffer += decoder.decode(value, { stream: true });
+
+		let idx = buffer.indexOf("\n\n");
+		while (idx !== -1) {
+			const chunk = buffer.slice(0, idx);
+			buffer = buffer.slice(idx + 2);
+			idx = buffer.indexOf("\n\n");
+
+			const data = extractEventData(chunk);
+			if (!data) continue;
+
+			let event;
+			try {
+				event = JSON.parse(data);
+			} catch {
+				continue;
+			}
+
+			if (event.type === "response.output_text.delta" && typeof event.delta === "string") {
+				text += event.delta;
+			}
+
+			if (event.type === "response.output_item.done" && event.item?.type === "message") {
+				const parts = Array.isArray(event.item?.content) ? event.item.content : [];
+				const full = parts
+					.filter((p) => p.type === "output_text" && typeof p.text === "string")
+					.map((p) => p.text)
+					.join("\n");
+				if (full) fallbackText = full;
+			}
+
+			if (event.type === "error") {
+				throw new Error(event.message || "OpenRouter stream failed");
+			}
+
+			if (event.type === "response.failed") {
+				throw new Error(event.response?.error?.message || "OpenRouter response failed");
+			}
+		}
+	}
+
+	const finalText = (text || fallbackText || "").trim();
+	if (!finalText) {
+		throw new Error("OpenRouter returned an empty response");
+	}
+	return finalText;
+}
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	if (args.help || !args.query) {
@@ -506,24 +606,35 @@ async function main() {
 	const model = pickFastModel(provider, args.model, piAi);
 	const { apiKey, accountId } = await resolveApiKey(provider, auth, authPath, piAi);
 
-	const text =
-		provider === "openai-codex"
-			? await runCodexSearch({
-					model: model.id,
-					apiKey,
-					accountId,
-					query: args.query,
-					purpose: args.purpose,
-					timeoutMs: args.timeoutMs,
-					baseUrl: model.baseUrl,
-			  })
-			: await runAnthropicSearch({
-					model: model.id,
-					apiKey,
-					query: args.query,
-					purpose: args.purpose,
-					timeoutMs: args.timeoutMs,
-			  });
+	let text;
+	if (provider === "openai-codex") {
+		text = await runCodexSearch({
+			model: model.id,
+			apiKey,
+			accountId,
+			query: args.query,
+			purpose: args.purpose,
+			timeoutMs: args.timeoutMs,
+			baseUrl: model.baseUrl,
+		});
+	} else if (provider === "openrouter") {
+		text = await runOpenRouterSearch({
+			model: model.id,
+			apiKey,
+			query: args.query,
+			purpose: args.purpose,
+			timeoutMs: args.timeoutMs,
+			baseUrl: model.baseUrl,
+		});
+	} else {
+		text = await runAnthropicSearch({
+			model: model.id,
+			apiKey,
+			query: args.query,
+			purpose: args.purpose,
+			timeoutMs: args.timeoutMs,
+		});
+	}
 
 	if (args.json) {
 		console.log(

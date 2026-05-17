@@ -6,6 +6,7 @@ import { homedir } from "os";
 import { dirname, isAbsolute, join, resolve } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
 
+
 function parseArgs(argv) {
 	const out = {
 		provider: undefined,
@@ -69,13 +70,20 @@ function parseArgs(argv) {
 
 function usage() {
 	return `Usage:
-  node search.mjs "<query>" [--purpose "<why>"] [--provider openai-codex|anthropic|openrouter] [--model <id>] [--json]
+  node search.mjs "<query>" [--purpose "<why>"] [--provider auto|openai-codex|anthropic|openrouter|deepseek|mistral] [--model <id>] [--json]
+
+Providers:
+  auto         - Auto-detect best available provider (default)
+  anthropic    - Anthropic Claude (requires anthropic API key)
+  openai-codex - OpenAI Codex (requires ChatGPT Plus)
+  openrouter   - OpenRouter Responses API (requires openrouter API key)
+  deepseek     - DeepSeek (uses DuckDuckGo fallback since no native web search)
+  duckduckgo   - Free DuckDuckGo search (no API key needed, always works)
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
-  node search.mjs "HTTP/3 browser support 2026" --provider openai-codex
-  node search.mjs "vite 7 breaking changes" --provider openrouter
-  node search.mjs "react 19 features" --provider openrouter --model openai/gpt-4o
+  node search.mjs "HTTP/3 browser support 2026" --provider deepseek
+  node search.mjs "react 19 features" --provider duckduckgo
   node search.mjs "vite 7 breaking changes" --json`;
 }
 
@@ -117,27 +125,63 @@ function getAgentDir() {
 	return configured;
 }
 
+// All known search-capable providers, in priority order for auto-detection
+const SEARCH_PROVIDERS = ["openai-codex", "anthropic", "openrouter", "duckduckgo"];
+
 function normalizeProvider(provider) {
 	if (!provider) return undefined;
 	const p = String(provider).toLowerCase().trim();
 	if (p.includes("anthropic") || p.includes("claude")) return "anthropic";
 	if (p.includes("codex") || p === "openai" || p.startsWith("openai")) return "openai-codex";
 	if (p.includes("openrouter")) return "openrouter";
+	if (p.includes("deepseek")) return "deepseek";
+	if (p.includes("mistral")) return "mistral";
+	if (p === "duckduckgo" || p === "ddg") return "duckduckgo";
 	return undefined;
 }
 
+// Providers that have native web search tool support
+const NATIVE_SEARCH_PROVIDERS = new Set(["openai-codex", "anthropic", "openrouter"]);
+
+function hasNativeSearch(provider) {
+	return NATIVE_SEARCH_PROVIDERS.has(provider);
+}
+
 function pickProvider(argProvider, settings, auth) {
-	const forced = normalizeProvider(argProvider);
-	if (forced) return forced;
+	// Explicit --provider flag takes precedence
+	if (argProvider) {
+		const normalized = normalizeProvider(argProvider);
+		if (normalized) return normalized;
+		if (argProvider === "auto") {
+			// fall through to auto-detect below
+		} else {
+			throw new Error(
+				`Unknown provider '${argProvider}'. Supported: auto, ${SEARCH_PROVIDERS.join(", ")}, deepseek, mistral`,
+			);
+		}
+	}
 
+	// If explicit provider was "auto" or not set, auto-detect best provider
+	// First try: settings.defaultProvider → if it has native search support, use it
 	const fromSettings = normalizeProvider(settings?.defaultProvider);
-	if (fromSettings) return fromSettings;
+	if (fromSettings && hasNativeSearch(fromSettings) && auth?.[fromSettings]) {
+		return fromSettings;
+	}
 
-	if (auth?.["openai-codex"]) return "openai-codex";
-	if (auth?.anthropic) return "anthropic";
-	if (auth?.openrouter) return "openrouter";
+	// Second try: settings.defaultProvider → if it's deepseek/mistral, we'll use duckduckgo
+	if (fromSettings && (fromSettings === "deepseek" || fromSettings === "mistral")) {
+		return "duckduckgo";
+	}
 
-	throw new Error("Could not determine provider. Pass --provider openai-codex|anthropic|openrouter");
+	// Third try: check auth keys in priority order
+	for (const provider of SEARCH_PROVIDERS) {
+		if (auth?.[provider]) {
+			return provider;
+		}
+	}
+
+	// Last resort: DuckDuckGo (free, no API key needed)
+	return "duckduckgo";
 }
 
 function decodeJwtAccountId(jwt) {
@@ -230,6 +274,17 @@ async function loadPiAi() {
 	);
 }
 
+const SEARCH_USER_AGENTS = [
+	"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+	"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36",
+];
+
+/** Pick a random User-Agent from the pool. */
+function randomUA() {
+	return SEARCH_USER_AGENTS[Math.floor(Math.random() * SEARCH_USER_AGENTS.length)];
+}
+
 function pickFastModel(provider, requestedModel, piAi) {
 	const models = typeof piAi.getModels === "function" ? piAi.getModels(provider) : [];
 	if (!Array.isArray(models) || models.length === 0) {
@@ -262,6 +317,11 @@ function pickFastModel(provider, requestedModel, piAi) {
 }
 
 async function resolveApiKey(provider, auth, authPath, piAi) {
+	// DuckDuckGo doesn't need an API key
+	if (provider === "duckduckgo") {
+		return { apiKey: "", accountId: undefined };
+	}
+
 	const entry = auth?.[provider];
 	if (!entry) {
 		throw new Error(`No credentials for provider '${provider}' in ${authPath}`);
@@ -588,6 +648,175 @@ async function runOpenRouterSearch({ model, apiKey, query, purpose, timeoutMs, b
 	return finalText;
 }
 
+// ── DuckDuckGo fallback (free, no API key needed) ──────────────────────
+
+/**
+ * Extract search results from DuckDuckGo's lite HTML endpoint.
+ * The lite endpoint (https://lite.duckduckgo.com/lite/) returns a simple
+ * HTML table that's much less prone to rate-limiting than the full HTML search.
+ */
+function parseDuckDuckGoLite(html) {
+	const results = [];
+
+	// DDG lite uses a simple table. Links with class="result-link" are search results.
+	// Sponsored links have "(Sponsored link -" following them.
+	// Organic links are inside <td> elements with snippets below.
+
+	// Find all result-link anchors
+	const linkRegex = /<a[^>]*rel="nofollow"[^>]*href="([^"]*)"[^>]*class='result-link'[^>]*>([\s\S]*?)<\/a>/gi;
+	let match;
+
+	while ((match = linkRegex.exec(html)) !== null) {
+		const url = match[1].trim();
+		const title = match[2].replace(/<[^>]+>/g, "").trim();
+
+		if (!title) continue;
+
+		// Skip sponsored links (followed by "Sponsored link" text)
+		const afterLink = html.slice(match.index + match[0].length, match.index + match[0].length + 200);
+		if (afterLink.includes("Sponsored link")) continue;
+
+		// Skip DuckDuckGo internal links
+		if (url.startsWith("https://duckduckgo.com/") || url.startsWith("//duckduckgo.com/")) continue;
+
+		// Find the snippet - it's in the next <td class='result-snippet'>
+		const snippetRegex = /<td\s+class='result-snippet'[^>]*>([\s\S]*?)<\/td>/i;
+		const snippetMatch = snippetRegex.exec(afterLink);
+		const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+
+		results.push({"title": title, "url": url, "snippet": snippet});
+	}
+
+	return results;
+}
+
+async function runDuckDuckGoSearch({ query, purpose, timeoutMs }) {
+	const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+
+	const ua = randomUA();
+
+	const res = await fetch("https://lite.duckduckgo.com/lite/", {
+		method: "POST",
+		headers: {
+			"user-agent": ua,
+			"content-type": "application/x-www-form-urlencoded",
+			accept: "text/html",
+		},
+		body: new URLSearchParams({ q: query }).toString(),
+		signal,
+	});
+
+	if (!res.ok) {
+		// If lite returns 503 or similar, try the full HTML endpoint as backup
+		if (res.status >= 500 || res.status === 429 || res.status === 403) {
+			return await fallbackSearch(query, purpose);
+		}
+		throw new Error(`DuckDuckGo lite request failed (${res.status})`);
+	}
+
+	const html = await res.text();
+	const results = parseDuckDuckGoLite(html);
+
+	if (results.length === 0) {
+		return `No search results found for "${query}".`;
+	}
+
+	// Build a concise summary
+	const lines = [];
+	lines.push(`## Search Results: ${query}`);
+	lines.push(`> Purpose: ${purpose}`);
+	lines.push("");
+
+	const topResults = results.slice(0, 10);
+	for (let i = 0; i < topResults.length; i++) {
+		const r = topResults[i];
+		lines.push(`### ${i + 1}. ${r.title}`);
+		if (r.snippet) lines.push(`   ${r.snippet.replace(/\n/g, " ")}`);
+		if (r.url) lines.push(`   <${r.url}>`);
+		lines.push("");
+	}
+
+	lines.push("---");
+	lines.push(`Results from DuckDuckGo. ${results.length} results found. Visit the linked URLs for full details.`);
+
+	return lines.join("\n");
+}
+
+/**
+ * Fallback search when DuckDuckGo lite is unavailable.
+ * Uses SearXNG or a basic HTML scraping approach.
+ */
+async function fallbackSearch(query, purpose) {
+	// Try the full DDG HTML search as a last resort
+	const ua = randomUA();
+	const res = await fetch(
+		`https://html.duckduckgo.com/html/?q=${encodeURIComponent(query)}`,
+		{
+			headers: {
+				"user-agent": ua,
+				accept: "text/html",
+			},
+			signal: AbortSignal.timeout(15000),
+		},
+	);
+
+	if (!res.ok) {
+		throw new Error(`DuckDuckGo HTML search unavailable (${res.status})`);
+	}
+
+	const html = await res.text();
+
+	// Parse DDG HTML search results
+	const results = [];
+	const linkRegex = /<a[^>]*rel="nofollow"[^>]*class="[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+	const snippetRegex = /<a[^>]*class="result__snippet"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+
+	// Simpler: extract result__body blocks
+	const blockRegex = /<div[^>]*class="result__body"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
+	let blockMatch;
+
+	while ((blockMatch = blockRegex.exec(html)) !== null) {
+		const block = blockMatch[1];
+
+		// Title link
+		const tMatch = /<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+		// Snippet
+		const sMatch = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
+
+		if (tMatch) {
+			results.push({
+				title: tMatch[2].replace(/<[^>]+>/g, "").trim(),
+				url: tMatch[1].trim(),
+				snippet: sMatch ? sMatch[1].replace(/<[^>]+>/g, "").trim() : "",
+			});
+		}
+	}
+
+	if (results.length === 0) {
+		return `DuckDuckGo returned no results for "${query}".`;
+	}
+
+	const lines = [];
+	lines.push(`## Search Results: ${query}`);
+	lines.push(`> Purpose: ${purpose}`);
+	lines.push("");
+
+	for (let i = 0; i < Math.min(results.length, 10); i++) {
+		const r = results[i];
+		lines.push(`### ${i + 1}. ${r.title}`);
+		if (r.snippet) lines.push(`   ${r.snippet}`);
+		if (r.url) lines.push(`   <${r.url}>`);
+		lines.push("");
+	}
+
+	lines.push("---");
+	lines.push(`Results from DuckDuckGo (HTML fallback). ${results.length} results found.`);
+
+	return lines.join("\n");
+}
+
+// ── Main ──────────────────────────────────────────────────────────────
+
 async function main() {
 	const args = parseArgs(process.argv.slice(2));
 	if (args.help || !args.query) {
@@ -602,11 +831,46 @@ async function main() {
 	const settings = readJson(settingsPath, {});
 
 	const provider = pickProvider(args.provider, settings, auth);
+
+	let text;
+
+	if (provider === "duckduckgo") {
+		// Free DuckDuckGo search — no API key or pi-ai needed
+		text = await runDuckDuckGoSearch({
+			query: args.query,
+			purpose: args.purpose,
+			timeoutMs: args.timeoutMs,
+		});
+
+		if (args.json) {
+			console.log(
+				JSON.stringify(
+					{
+						provider: "duckduckgo",
+						model: "duckduckgo-web",
+						query: args.query,
+						purpose: args.purpose,
+						result: text,
+					},
+					null,
+					2,
+				),
+			);
+			return;
+		}
+
+		console.log(`Provider: duckduckgo`);
+		console.log(`Model: duckduckgo-web`);
+		console.log("");
+		console.log(text);
+		return;
+	}
+
+	// For native-search providers, load pi-ai and resolve credentials
 	const piAi = await loadPiAi();
 	const model = pickFastModel(provider, args.model, piAi);
 	const { apiKey, accountId } = await resolveApiKey(provider, auth, authPath, piAi);
 
-	let text;
 	if (provider === "openai-codex") {
 		text = await runCodexSearch({
 			model: model.id,

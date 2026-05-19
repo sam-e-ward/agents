@@ -6,7 +6,15 @@ license: Stolen from Mario
 
 # Web Browser Skill
 
-Minimal CDP tools for collaborative site exploration.
+Minimal CDP tools for collaborative site exploration. Works on **macOS** and **Linux** (including WSL2).
+
+## Setup
+
+Before first use, make sure you have Chrome or Chromium installed:
+
+- **macOS**: `brew install --cask google-chrome` or download from https://google.com/chrome
+- **Linux**: `sudo apt install chromium-browser`
+- **Override**: Set `CHROME_BIN` env var to any Chromium-based browser path
 
 ## Start Chrome
 
@@ -15,7 +23,7 @@ Minimal CDP tools for collaborative site exploration.
 ./scripts/start.js --profile    # Copy your profile (cookies, logins)
 ```
 
-Start Chrome on `:9222` with remote debugging.
+Starts Chrome/Chromium on `:9222` with remote debugging.
 
 ## Navigate
 
@@ -42,7 +50,7 @@ Execute JavaScript in active tab (async context).  Be careful with string escapi
 ./scripts/screenshot.js
 ```
 
-Screenshot current viewport, returns temp file path
+Screenshot current viewport, returns temp file path.
 
 ## Pick Elements
 

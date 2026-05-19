@@ -6,19 +6,33 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { homedir, platform } from "node:os";
 
-const useProfile = process.argv[2] === "--profile";
+const args = process.argv.slice(2);
+const useProfile = args.includes("--profile");
+const useHeadless = args.includes("--headless");
 
-if (process.argv[2] && process.argv[2] !== "--profile") {
-  console.log("Usage: start.js [--profile]");
-  console.log("\nOptions:");
-  console.log(
-    "  --profile  Copy your default Chrome/Chromium profile (cookies, logins)",
-  );
-  console.log("\nExamples:");
-  console.log("  start.js            # Start with fresh profile");
-  console.log("  start.js --profile  # Start with your existing profile");
+if (args.some((a) => a !== "--profile" && a !== "--headless")) {
+  console.log("Usage: start.js [--profile] [--headless]");
+  console.log("");
+  console.log("Options:");
+  console.log("  --profile   Copy your default Chrome/Chromium profile (cookies, logins)");
+  console.log("  --headless  Run without a visible window (no GUI needed)");
+  console.log("");
+  console.log("Environment:");
+  console.log("  CHROME_BIN        Path or command name of the browser binary");
+  console.log("  CHROME_HEADLESS=1 Force headless mode");
+  console.log("");
+  console.log("Examples:");
+  console.log("  start.js              # Start with fresh profile (visible window)");
+  console.log("  start.js --headless   # Start headless (no window)");
+  console.log("  start.js --profile    # Start with your existing profile");
   process.exit(1);
 }
+
+// Determine headless mode:
+// 1. --headless flag  2. CHROME_HEADLESS=1 env  3. No DISPLAY → auto-headless
+const forceHeadless = useHeadless || process.env.CHROME_HEADLESS === "1";
+const noDisplay = !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+const headless = forceHeadless || noDisplay;
 
 const HOME = homedir();
 const IS_MAC = platform() === "darwin";
@@ -143,46 +157,42 @@ if (useProfile) {
 
 console.log(`  Using browser: ${browserPath}`);
 
+const launchArgs = [
+  "--remote-debugging-port=9222",
+  `--user-data-dir=${cacheDir}`,
+  "--profile-directory=Default",
+  "--disable-search-engine-choice-screen",
+  "--no-first-run",
+  "--disable-features=ProfilePicker",
+  "--disable-gpu",
+  "--disable-session-crashed-bubble",
+];
+
+if (headless) {
+  launchArgs.push("--headless=new");
+}
+
+// --no-sandbox is needed in Docker, CI, WSL2, and other restricted environments.
+// It's safe to always include since this is a dedicated debugging instance.
+if (IS_LINUX) {
+  launchArgs.push("--no-sandbox");
+}
+
 if (IS_MAC) {
   // macOS: use `open -na` to launch in background
-  const args = [
-    "-na",
-    browserPath.endsWith("Google Chrome")
-      ? "Google Chrome"
-      : browserPath.endsWith("Chromium")
-        ? "Chromium"
-        : browserPath,
-    "--args",
-    "--remote-debugging-port=9222",
-    `--user-data-dir=${cacheDir}`,
-    "--profile-directory=Default",
-    "--disable-search-engine-choice-screen",
-    "--no-first-run",
-    "--disable-features=ProfilePicker",
-  ];
+  const appName = browserPath.endsWith("Google Chrome")
+    ? "Google Chrome"
+    : browserPath.endsWith("Chromium")
+      ? "Chromium"
+      : browserPath;
 
-  spawn("/usr/bin/open", args, { detached: true, stdio: "ignore" }).unref();
+  spawn("/usr/bin/open", ["-na", appName, "--args", ...launchArgs], {
+    detached: true,
+    stdio: "ignore",
+  }).unref();
 } else {
   // Linux: spawn the binary directly
-  const args = [
-    "--remote-debugging-port=9222",
-    `--user-data-dir=${cacheDir}`,
-    "--profile-directory=Default",
-    "--disable-search-engine-choice-screen",
-    "--no-first-run",
-    "--disable-features=ProfilePicker",
-    // Disable GPU on WSL/headless environments
-    "--disable-gpu",
-    // Don't show restore dialog after crashes
-    "--disable-session-crashed-bubble",
-  ];
-
-  // Only add --no-sandbox if running as root (e.g. CI/Docker)
-  if (process.getuid?.() === 0) {
-    args.push("--no-sandbox");
-  }
-
-  const proc = spawn(browserPath, args, {
+  const proc = spawn(browserPath, launchArgs, {
     detached: true,
     stdio: "ignore",
   });

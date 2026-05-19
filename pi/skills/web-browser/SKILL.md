@@ -19,11 +19,17 @@ Before first use, make sure you have Chrome or Chromium installed:
 ## Start Chrome
 
 ```bash
-./scripts/start.js              # Fresh profile
-./scripts/start.js --profile    # Copy your profile (cookies, logins)
+./scripts/start.js                  # Fresh profile (visible window)
+./scripts/start.js --headless       # No visible window (background)
+./scripts/start.js --profile        # Copy your profile (cookies, logins)
+./scripts/start.js --profile --headless  # Profile + headless
 ```
 
 Starts Chrome/Chromium on `:9222` with remote debugging.
+
+- **`--headless`** runs without a visible window — useful on servers or WSL
+- **`CHROME_HEADLESS=1`** env var also forces headless mode
+- **Auto-headless**: if `DISPLAY` isn't set, headless is used automatically
 
 ## Navigate
 

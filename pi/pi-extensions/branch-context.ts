@@ -2,6 +2,7 @@ import { complete, getModel } from "@mariozechner/pi-ai";
 import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
 
 const MAX_DIFF_BYTES = 40000; // keep diff under context limits
+const SUMMARY_TIMEOUT_MS = 15000; // max time to wait for LLM summary
 
 interface ContextInfo {
 	currentBranch: string;
@@ -190,27 +191,38 @@ export default function (pi: ExtensionAPI) {
 			const apiKey = await ctx.modelRegistry.getApiKey(model);
 			if (!apiKey) continue;
 
-			const response = await complete(
-				model,
-				{
-					messages: [
+			try {
+				const response = await Promise.race([
+					complete(
+						model,
 						{
-							role: "user" as const,
-							content: [{ type: "text" as const, text: prompt }],
-							timestamp: Date.now(),
+							messages: [
+								{
+									role: "user" as const,
+									content: [{ type: "text" as const, text: prompt }],
+									timestamp: Date.now(),
+								},
+							],
 						},
-					],
-				},
-				{ apiKey, reasoningEffort: "low" },
-			);
+						{ apiKey, reasoningEffort: "low" },
+					),
+					new Promise<never>((_, reject) =>
+						setTimeout(() => reject(new Error(`Timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)), SUMMARY_TIMEOUT_MS),
+					),
+				]);
 
-			const text = response.content
-				.filter((c): c is { type: "text"; text: string } => c.type === "text")
-				.map((c) => c.text)
-				.join("")
-				.trim();
+				const text = response.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map((c) => c.text)
+					.join("")
+					.trim();
 
-			return text || null;
+				return text || null;
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				ctx.ui.setWidget("branch-context", [`⚠️ ${provider}/${id}: ${msg} — trying next model...`]);
+				continue;
+			}
 		}
 
 		return null;
@@ -243,7 +255,13 @@ export default function (pi: ExtensionAPI) {
 				: `📍 ${contextInfo.currentBranch} — summarising changes...`;
 			ctx.ui.setWidget("branch-context", [label]);
 
-			summary = await summariseDiff(contextInfo, ctx);
+			try {
+				summary = await summariseDiff(contextInfo, ctx);
+			} catch (err) {
+				const msg = err instanceof Error ? err.message : String(err);
+				ctx.ui.setWidget("branch-context", [`⚠️ ${contextInfo.currentBranch} — summary failed: ${msg}`]);
+				return;
+			}
 
 			if (summary) {
 				ctx.ui.setWidget("branch-context", [`📍 ${contextInfo.currentBranch} — ${summary}`]);
@@ -251,7 +269,7 @@ export default function (pi: ExtensionAPI) {
 				const detail = contextInfo.isTrunk
 					? "uncommitted changes"
 					: `${contextInfo.commitCount} commits from ${contextInfo.parentBranch}`;
-				ctx.ui.setWidget("branch-context", [`📍 ${contextInfo.currentBranch} (${detail})`]);
+				ctx.ui.setWidget("branch-context", [`⚠️ ${contextInfo.currentBranch} (${detail}) — no model available for summary`]);
 			}
 		} catch {
 			// Silently ignore

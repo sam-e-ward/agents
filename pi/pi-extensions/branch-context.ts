@@ -188,8 +188,8 @@ export default function (pi: ExtensionAPI) {
 		for (const [provider, id] of modelCandidates) {
 			const model = getModel(provider, id);
 			if (!model) continue;
-			const apiKey = await ctx.modelRegistry.getApiKey(model);
-			if (!apiKey) continue;
+			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+			if (!auth.ok) continue;
 
 			try {
 				const response = await Promise.race([
@@ -204,7 +204,7 @@ export default function (pi: ExtensionAPI) {
 								},
 							],
 						},
-						{ apiKey, reasoningEffort: "low" },
+						{ apiKey: auth.apiKey, headers: auth.headers, reasoningEffort: "low" },
 					),
 					new Promise<never>((_, reject) =>
 						setTimeout(() => reject(new Error(`Timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)), SUMMARY_TIMEOUT_MS),

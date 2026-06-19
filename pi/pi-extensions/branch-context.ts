@@ -246,6 +246,8 @@ export default function (pi: ExtensionAPI) {
 			return;
 		}
 
+		if (_event.reason === "resume") return;
+
 		try {
 			contextInfo = await computeContextInfo();
 			if (!contextInfo) return;

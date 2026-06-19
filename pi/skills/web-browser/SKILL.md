@@ -31,6 +31,15 @@ Starts Chrome/Chromium on `:9222` with remote debugging.
 - **`CHROME_HEADLESS=1`** env var also forces headless mode
 - **Auto-headless**: if `DISPLAY` isn't set, headless is used automatically
 
+## Stop Chrome
+
+```bash
+./scripts/stop.js
+```
+
+Gracefully closes all tabs and kills the browser process running on `:9222`.
+Also kills the detached `watch.js` log watcher.
+
 ## Navigate
 
 ```bash

@@ -158,10 +158,10 @@ export default function (pi: ExtensionAPI) {
 
 	async function summariseDiff(info: ContextInfo, ctx: ExtensionContext): Promise<string | null> {
 		const modelCandidates = [
-			["anthropic", "claude-sonnet-4-20250514"],
-			["openai", "gpt-4.1-mini"],
-			["anthropic", "claude-haiku-4-20250414"],
-			["google", "gemini-2.5-flash"],
+			["anthropic", "claude-haiku-4-5"],
+			["openai-codex", "gpt-5.4-mini"],
+			["openai-codex", "gpt-5.3-codex-spark"],
+			["anthropic", "claude-3-5-haiku-latest"],
 		];
 
 		let prompt: string;

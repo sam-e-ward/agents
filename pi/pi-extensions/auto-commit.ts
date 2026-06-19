@@ -13,7 +13,14 @@
  * Provides /scrap command to undo the last auto-commit and stash changes.
  */
 
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+
+const LIGHT_MODEL_CANDIDATES = [
+	["anthropic", "claude-haiku-4-5"],
+	["openai-codex", "gpt-5.4-mini"],
+	["openai-codex", "gpt-5.3-codex-spark"],
+	["anthropic", "claude-3-5-haiku-latest"],
+] as const;
 
 const COMMIT_MSG_PROMPT = `You are a commit message generator. Given a git diff, write a single-line commit message.
 
@@ -78,9 +85,9 @@ export default function (pi: ExtensionAPI) {
 		// Count files for the notification
 		const fileCount = stagedStat.split("\n").filter((l) => l.includes("|")).length;
 
-		// Generate commit message from the diff using an LLM
-		const currentModel = ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
-		const commitMessage = await generateCommitMessage(pi, repoRoot, currentModel);
+		// Generate commit message from the diff using a lightweight LLM
+		const lightModel = await findLightModel(ctx);
+		const commitMessage = await generateCommitMessage(pi, repoRoot, lightModel);
 
 		// Check if we have a previous auto-commit for this repo
 		const prev = lastAutoCommit.get(repoRoot);
@@ -95,7 +102,7 @@ export default function (pi: ExtensionAPI) {
 			if (headSha.trim() === prev.sha) {
 				// Ask the LLM to classify the intent
 				const classification = await classifyAmendOrNew(
-					pi, prev.message, lastUserPrompt, currentModel,
+					pi, prev.message, lastUserPrompt, lightModel,
 				);
 
 				if (classification === "AMEND") {
@@ -187,6 +194,19 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_start", async () => {
 		lastAutoCommit.clear();
 	});
+}
+
+async function findLightModel(
+	ctx: ExtensionContext,
+): Promise<{ provider: string; id: string } | undefined> {
+	for (const [provider, id] of LIGHT_MODEL_CANDIDATES) {
+		const model = ctx.modelRegistry.find(provider, id);
+		if (!model) continue;
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (auth.ok) return { provider, id };
+	}
+	// Fall back to session model if no light model available
+	return ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 }
 
 async function classifyAmendOrNew(

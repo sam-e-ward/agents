@@ -13,7 +13,7 @@
  * Provides /scrap command to undo the last auto-commit and stash changes.
  */
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const LIGHT_MODEL_CANDIDATES = [
 	["anthropic", "claude-haiku-4-5"],

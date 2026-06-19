@@ -1,7 +1,7 @@
-import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
-import { StringEnum } from "@mariozechner/pi-ai";
-import { Text } from "@mariozechner/pi-tui";
+import { StringEnum } from "@earendil-works/pi-ai";
+import { Text } from "@earendil-works/pi-tui";
 import { execSync } from "node:child_process";
 import { readFileSync, readdirSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, basename } from "node:path";

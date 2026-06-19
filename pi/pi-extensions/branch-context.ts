@@ -1,5 +1,5 @@
-import { complete, getModel } from "@mariozechner/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import { complete, getModel } from "@earendil-works/pi-ai";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
 const MAX_DIFF_BYTES = 40000; // keep diff under context limits
 const SUMMARY_TIMEOUT_MS = 15000; // max time to wait for LLM summary

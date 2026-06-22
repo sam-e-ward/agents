@@ -50,12 +50,15 @@ export default function (pi: ExtensionAPI) {
 	// Track last auto-commit per repo: repoRoot -> { sha, message }
 	const lastAutoCommit = new Map<string, { sha: string; message: string }>();
 	let lastUserPrompt = "";
+	let autoCommitEnabled = true;
 
 	pi.on("before_agent_start", async (event) => {
 		lastUserPrompt = event.prompt;
 	});
 
 	pi.on("agent_end", async (_event, ctx) => {
+		if (!autoCommitEnabled) return;
+
 		// Find the git repo root for the cwd
 		const { stdout: repoRootRaw, code: repoCode } = await pi.exec(
 			"git", ["-C", ctx.cwd, "rev-parse", "--show-toplevel"],
@@ -190,9 +193,22 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// /autocommit command: toggle auto-commit for this session
+	pi.registerCommand("autocommit", {
+		description: "Toggle auto-commit on/off for this session",
+		handler: async (_args, ctx) => {
+			autoCommitEnabled = !autoCommitEnabled;
+			ctx.ui.notify(
+				`Auto-commit ${autoCommitEnabled ? "enabled" : "disabled"} for this session`,
+				"info",
+			);
+		},
+	});
+
 	// Clear tracking on new session
 	pi.on("session_start", async () => {
 		lastAutoCommit.clear();
+		autoCommitEnabled = true;
 	});
 }
 

@@ -33,28 +33,27 @@ Rules:
 - No conventional commit prefixes (no feat:, fix:, etc.)
 - If multiple things changed, summarize the overall intent`;
 
-const CLASSIFY_PROMPT = `You decide whether new code changes should AMEND a previous commit or be a NEW commit.
+const CLASSIFY_PROMPT = `You decide whether newly staged code changes should AMEND the previous commit or become a NEW commit.
 
 You'll receive:
 - The previous commit message
-- The user's prompt that triggered the new changes
+- The diff of the previous commit
+- The currently staged changes
+- The combined diff (previous commit + staged changes together)
 
-Rules:
-- Output a single word: AMEND, NEW, or UNCERTAIN
-- AMEND: the user is correcting, fixing, or refining what was just done (e.g. "that's not quite right", "fix the typo", "actually use X instead", "that didn't work", "try again", "close but change Y")
-- NEW: the user is moving on to a different task or building on top of what's done (e.g. "ok great, now do C", "next add tests", "also update the docs", "let's move on to X")
-- UNCERTAIN: the prompt is ambiguous and could go either way
-- When in doubt, say UNCERTAIN`;
+Answer TWO questions. For each, reply with exactly Y, N, or UNSURE.
+
+Q1: Do the staged changes touch only the same files / functions / components as the previous commit? (i.e. they refine or continue the same work rather than adding something separate)
+Q2: Does the previous commit message still accurately describe the combined changes?
+
+Output format — exactly two lines, nothing else:
+Q1: <Y|N|UNSURE>
+Q2: <Y|N|UNSURE>`;
 
 export default function (pi: ExtensionAPI) {
 	// Track last auto-commit per repo: repoRoot -> { sha, message }
 	const lastAutoCommit = new Map<string, { sha: string; message: string }>();
-	let lastUserPrompt = "";
 	let autoCommitEnabled = true;
-
-	pi.on("before_agent_start", async (event) => {
-		lastUserPrompt = event.prompt;
-	});
 
 	pi.on("agent_end", async (_event, ctx) => {
 		if (!autoCommitEnabled) return;
@@ -88,40 +87,29 @@ export default function (pi: ExtensionAPI) {
 		// Count files for the notification
 		const fileCount = stagedStat.split("\n").filter((l) => l.includes("|")).length;
 
-		// Generate commit message from the diff using a lightweight LLM
 		const lightModel = await findLightModel(ctx);
-		const commitMessage = await generateCommitMessage(pi, repoRoot, lightModel);
 
-		// Check if we have a previous auto-commit for this repo
+		// Check if we have a previous auto-commit for this repo that is still HEAD
 		const prev = lastAutoCommit.get(repoRoot);
 		let amend = false;
 
-		if (prev && ctx.hasUI) {
-			// Verify the previous auto-commit is still HEAD
+		if (prev) {
 			const { stdout: headSha } = await pi.exec(
 				"git", ["-C", repoRoot, "rev-parse", "HEAD"],
 				{ timeout: 5000 },
 			);
 			if (headSha.trim() === prev.sha) {
-				// Ask the LLM to classify the intent
-				const classification = await classifyAmendOrNew(
-					pi, prev.message, lastUserPrompt, lightModel,
-				);
-
-				if (classification === "AMEND") {
-					amend = true;
-				} else if (classification === "NEW") {
-					amend = false;
-				} else {
-					// UNCERTAIN or failed — fall back to user prompt
-					const choice = await ctx.ui.select("Previous auto-commit exists for this repo", [
-						"Amend — fold into previous commit (fix)",
-						"New commit — keep previous, add another (build on it)",
-					]);
-					amend = choice?.startsWith("Amend") ?? false;
-				}
+				amend = await decideAmend(pi, repoRoot, prev.message, lightModel, ctx);
 			}
 		}
+
+		// Generate the commit message. When amending, base it on the COMBINED diff
+		// (previous commit + staged changes) so the message reflects the whole change,
+		// not just the latest tweak.
+		const diffArgs = amend
+			? ["diff", "--cached", "HEAD~1"]
+			: ["diff", "--cached"];
+		const commitMessage = await generateCommitMessage(pi, repoRoot, diffArgs, lightModel);
 
 		const commitArgs = ["-C", repoRoot, "commit"];
 		if (amend) commitArgs.push("--amend");
@@ -225,15 +213,73 @@ async function findLightModel(
 	return ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 }
 
-async function classifyAmendOrNew(
-	pi: ExtensionAPI,
-	prevCommitMessage: string,
-	userPrompt: string,
-	currentModel: { provider: string; id: string } | undefined,
-): Promise<"AMEND" | "NEW" | "UNCERTAIN"> {
-	if (!userPrompt.trim()) return "UNCERTAIN";
+type YNU = "Y" | "N" | "UNSURE";
 
-	const prompt = `Previous commit: ${prevCommitMessage}\nUser prompt: ${userPrompt}`;
+/**
+ * Decide whether to amend the previous auto-commit or create a new one.
+ *
+ * Asks a lightweight LLM two questions about the change (given the previous
+ * commit, the staged changes, and the combined diff):
+ *   Q1: do the staged changes touch only the same files/functions as before?
+ *   Q2: does the previous commit message still describe the combined changes?
+ *
+ * - Both Y  -> amend
+ * - Both N  -> new commit
+ * - Anything else -> prompt the user, defaulting to amend when there's a Y and
+ *   no N, otherwise defaulting to new.
+ */
+async function decideAmend(
+	pi: ExtensionAPI,
+	repoRoot: string,
+	prevCommitMessage: string,
+	currentModel: { provider: string; id: string } | undefined,
+	ctx: ExtensionContext,
+): Promise<boolean> {
+	const { q1, q2 } = await classifyAmendQuestions(pi, repoRoot, prevCommitMessage, currentModel);
+
+	if (q1 === "Y" && q2 === "Y") return true;
+	if (q1 === "N" && q2 === "N") return false;
+
+	// Ambiguous — pick a sensible default, then confirm with the user if we can.
+	const hasN = q1 === "N" || q2 === "N";
+	const hasY = q1 === "Y" || q2 === "Y";
+	const defaultAmend = hasY && !hasN;
+
+	if (!ctx.hasUI) return defaultAmend;
+
+	const amendOption = "Amend — fold into previous commit (fix)";
+	const newOption = "New commit — keep previous, add another (build on it)";
+	const options = defaultAmend ? [amendOption, newOption] : [newOption, amendOption];
+
+	const choice = await ctx.ui.select(
+		`Previous auto-commit exists. Same scope? ${q1}. Message still fits? ${q2}.`,
+		options,
+	);
+	return choice?.startsWith("Amend") ?? defaultAmend;
+}
+
+async function classifyAmendQuestions(
+	pi: ExtensionAPI,
+	repoRoot: string,
+	prevCommitMessage: string,
+	currentModel: { provider: string; id: string } | undefined,
+): Promise<{ q1: YNU; q2: YNU }> {
+	const prevDiff = await gitDiff(pi, repoRoot, ["diff", "HEAD~1", "HEAD"]);
+	const stagedDiff = await gitDiff(pi, repoRoot, ["diff", "--cached"]);
+	const combinedDiff = await gitDiff(pi, repoRoot, ["diff", "--cached", "HEAD~1"]);
+
+	const prompt = [
+		`Previous commit message: ${prevCommitMessage}`,
+		"",
+		"=== Previous commit diff ===",
+		prevDiff,
+		"",
+		"=== Staged changes ===",
+		stagedDiff,
+		"",
+		"=== Combined diff (previous commit + staged) ===",
+		combinedDiff,
+	].join("\n");
 
 	const args = [
 		"-p",
@@ -251,38 +297,48 @@ async function classifyAmendOrNew(
 	args.push(prompt);
 
 	try {
-		const { stdout, code } = await pi.exec("pi", args, { timeout: 10000 });
+		const { stdout, code } = await pi.exec("pi", args, { timeout: 15000 });
 		if (code === 0) {
-			const result = stdout.trim().toUpperCase();
-			if (result.includes("AMEND")) return "AMEND";
-			if (result.includes("NEW")) return "NEW";
+			return {
+				q1: parseAnswer(stdout, "Q1"),
+				q2: parseAnswer(stdout, "Q2"),
+			};
 		}
 	} catch {
 		// Fall through
 	}
 
-	return "UNCERTAIN";
+	return { q1: "UNSURE", q2: "UNSURE" };
+}
+
+function parseAnswer(output: string, label: string): YNU {
+	const line = output
+		.split("\n")
+		.find((l) => l.trim().toUpperCase().startsWith(`${label}:`));
+	const value = line?.split(":")[1]?.trim().toUpperCase() ?? "";
+	if (value.startsWith("Y")) return "Y";
+	if (value.startsWith("N")) return "N";
+	return "UNSURE";
+}
+
+async function gitDiff(pi: ExtensionAPI, repoRoot: string, args: string[]): Promise<string> {
+	const { stdout } = await pi.exec("git", ["-C", repoRoot, ...args], { timeout: 5000 });
+	const maxLen = 4096;
+	const diff = stdout.trim();
+	return diff.length > maxLen ? `${diff.slice(0, maxLen)}\n... (diff truncated)` : diff;
 }
 
 async function generateCommitMessage(
 	pi: ExtensionAPI,
 	repoRoot: string,
+	diffArgs: string[],
 	currentModel: { provider: string; id: string } | undefined,
 ): Promise<string> {
-	// Get the staged diff (truncated to avoid overwhelming the model)
-	const { stdout: fullDiff } = await pi.exec("git", ["-C", repoRoot, "diff", "--cached"], {
-		timeout: 5000,
-	});
-
-	// Truncate diff to ~4KB to keep token usage minimal
-	const maxDiffLen = 4096;
-	let diff = fullDiff;
-	if (diff.length > maxDiffLen) {
-		diff = diff.slice(0, maxDiffLen) + "\n... (diff truncated)";
-	}
+	// Get the diff (truncated to avoid overwhelming the model)
+	const diff = await gitDiff(pi, repoRoot, diffArgs);
 
 	// Also get the stat summary for context
-	const { stdout: stat } = await pi.exec("git", ["-C", repoRoot, "diff", "--cached", "--stat"], {
+	const { stdout: stat } = await pi.exec("git", ["-C", repoRoot, ...diffArgs, "--stat"], {
 		timeout: 5000,
 	});
 

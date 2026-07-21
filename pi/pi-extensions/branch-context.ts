@@ -1,8 +1,37 @@
+import * as fs from "node:fs";
+import * as path from "node:path";
 import { complete, getModel } from "@earendil-works/pi-ai";
+import { getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 
 const MAX_DIFF_BYTES = 40000; // keep diff under context limits
 const SUMMARY_TIMEOUT_MS = 15000; // max time to wait for LLM summary
+
+// Branches treated as candidate bases when a repo has no saved selection.
+const DEFAULT_BASES = ["master", "main"];
+
+// Per-repo base-branch selection is stored globally (keyed by repo root) so it
+// never gets committed into the repo itself.
+const BASES_CONFIG_PATH = path.join(getAgentDir(), "branch-context-bases.json");
+
+function readBasesConfig(): Record<string, string[]> {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(BASES_CONFIG_PATH, "utf-8"));
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+function writeBasesConfig(config: Record<string, string[]>): void {
+	try {
+		fs.mkdirSync(path.dirname(BASES_CONFIG_PATH), { recursive: true });
+		fs.writeFileSync(BASES_CONFIG_PATH, JSON.stringify(config, null, 2));
+	} catch {
+		// Best-effort persistence; ignore write failures.
+	}
+}
 
 interface ContextInfo {
 	currentBranch: string;
@@ -65,27 +94,23 @@ export default function (pi: ExtensionAPI) {
 		const { stdout: currentBranch, code: branchCode } = await git("rev-parse", "--abbrev-ref", "HEAD");
 		if (branchCode !== 0 || !currentBranch || currentBranch === "HEAD") return null;
 
-		const isTrunk = currentBranch === "main" || currentBranch === "master";
+		// Only consider the configured base branches (default: master/main) rather
+		// than scanning every local branch — the latter spawns one merge-base +
+		// rev-list per branch, which is O(branches) subprocesses on session start.
+		const localBranches = await listLocalBranches();
+		const configuredBases = await resolveBases(localBranches);
+
+		// On a base branch (e.g. main/master), only uncommitted changes matter.
+		const isTrunk = configuredBases.includes(currentBranch);
 
 		const uncommittedDiff = await getUncommittedDiff();
 
-		// Find the parent branch — check common trunks first, then all local branches
-		const candidates = ["main", "master", "develop", "dev"];
-		const { stdout: allBranches } = await git("branch", "--format=%(refname:short)");
-		if (allBranches) {
-			for (const b of allBranches.split("\n")) {
-				const name = b.trim();
-				if (name && name !== currentBranch && !candidates.includes(name)) {
-					candidates.push(name);
-				}
-			}
-		}
-
+		// Pick the base whose merge-base is nearest to HEAD (fewest commits ahead).
 		let bestBase: string | null = null;
 		let bestCount = Infinity;
 		let parentBranch: string | null = null;
 
-		for (const candidate of candidates) {
+		for (const candidate of configuredBases) {
 			if (candidate === currentBranch) continue;
 			const { stdout: mergeBase, code: mbCode } = await git("merge-base", currentBranch, candidate);
 			if (mbCode !== 0 || !mergeBase) continue;
@@ -228,11 +253,100 @@ export default function (pi: ExtensionAPI) {
 		return null;
 	}
 
+	async function listLocalBranches(): Promise<string[]> {
+		const { stdout } = await git("branch", "--format=%(refname:short)");
+		return stdout
+			? stdout.split("\n").map((s) => s.trim()).filter(Boolean)
+			: [];
+	}
+
+	async function repoRoot(): Promise<string> {
+		const { stdout } = await git("rev-parse", "--show-toplevel");
+		return stdout;
+	}
+
+	/** Configured base branches for this repo, filtered to ones that still exist. */
+	async function resolveBases(localBranches: string[]): Promise<string[]> {
+		const root = await repoRoot();
+		const stored = root ? readBasesConfig()[root] : undefined;
+		const wanted = stored ?? DEFAULT_BASES;
+		return wanted.filter((b) => localBranches.includes(b));
+	}
+
 	pi.registerCommand("abandon", {
 		description: "Start a fresh session without branch context",
 		handler: async (_args, ctx) => {
 			skipContext = true;
 			await ctx.newSession();
+		},
+	});
+
+	pi.registerCommand("bases", {
+		description: "Choose which local branches count as bases for branch-context",
+		handler: async (_args, ctx) => {
+			const root = await repoRoot();
+			if (!root) {
+				ctx.ui.notify("Not inside a git repository", "error");
+				return;
+			}
+
+			const localBranches = await listLocalBranches();
+			if (localBranches.length === 0) {
+				ctx.ui.notify("No local branches found", "warning");
+				return;
+			}
+
+			const selected = new Set(await resolveBases(localBranches));
+			// Show currently-selected bases first, then the rest alphabetically.
+			const ordered = [
+				...localBranches.filter((b) => selected.has(b)).sort(),
+				...localBranches.filter((b) => !selected.has(b)).sort(),
+			];
+			const items: SettingItem[] = ordered.map((b) => ({
+				id: b,
+				label: b,
+				currentValue: selected.has(b) ? "on" : "off",
+				values: ["on", "off"],
+			}));
+
+			await ctx.ui.custom((_tui, theme, _kb, done) => {
+				const container = new Container();
+				container.addChild(
+					new Text(theme.fg("accent", theme.bold("Branch-context base branches")), 1, 1),
+				);
+				container.addChild(
+					new Text(
+						theme.fg("dim", "Toggle bases to compare against. Type to search, Esc to save."),
+						1,
+						0,
+					),
+				);
+				const list = new SettingsList(
+					items,
+					Math.min(items.length + 2, 15),
+					getSettingsListTheme(),
+					(id, newValue) => {
+						if (newValue === "on") selected.add(id);
+						else selected.delete(id);
+					},
+					() => done(undefined),
+					{ enableSearch: true },
+				);
+				container.addChild(list);
+				return {
+					render: (w) => container.render(w),
+					invalidate: () => container.invalidate(),
+					handleInput: (data) => list.handleInput?.(data),
+				};
+			});
+
+			const config = readBasesConfig();
+			config[root] = [...selected];
+			writeBasesConfig(config);
+			ctx.ui.notify(
+				`Base branches: ${[...selected].sort().join(", ") || "(none)"}`,
+				"info",
+			);
 		},
 	});
 

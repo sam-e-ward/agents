@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { complete } from "@earendil-works/pi-ai";
 import { getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
-import { resolveToolModel } from "./lib/tool-model-config";
+import { resolveToolModel, registerToolModelsCommand } from "./lib/tool-model-config";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 
@@ -45,6 +45,8 @@ interface ContextInfo {
 }
 
 export default function (pi: ExtensionAPI) {
+	registerToolModelsCommand(pi);
+
 	let contextInfo: ContextInfo | null = null;
 	let summary: string | null = null;
 	let injected = false;

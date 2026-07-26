@@ -1,7 +1,8 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { complete, getModel } from "@earendil-works/pi-ai";
+import { complete } from "@earendil-works/pi-ai";
 import { getAgentDir, getSettingsListTheme } from "@earendil-works/pi-coding-agent";
+import { resolveToolModel } from "./lib/tool-model-config";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Container, type SettingItem, SettingsList, Text } from "@earendil-works/pi-tui";
 
@@ -181,13 +182,21 @@ export default function (pi: ExtensionAPI) {
 		return parts.join("\n");
 	}
 
+	const BRANCH_CONTEXT_DEFAULTS = [
+		["anthropic", "claude-haiku-4-5"],
+		["openai-codex", "gpt-5.4-mini"],
+		["openai-codex", "gpt-5.3-codex-spark"],
+		["anthropic", "claude-3-5-haiku-latest"],
+	] as const;
+
 	async function summariseDiff(info: ContextInfo, ctx: ExtensionContext): Promise<string | null> {
-		const modelCandidates = [
-			["deepseek", "deepseek-v4-flash"],
-			["openrouter", "deepseek/deepseek-v4-flash"],
-			["anthropic", "claude-haiku-4-5"],
-			["openai-codex", "gpt-5.4-mini"],
-		];
+		const resolved = await resolveToolModel("branch-context", ctx, BRANCH_CONTEXT_DEFAULTS);
+		if (!resolved) return null;
+
+		const model = ctx.modelRegistry.find(resolved.provider, resolved.id);
+		if (!model) return null;
+		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
+		if (!auth.ok) return null;
 
 		let prompt: string;
 		if (info.isTrunk) {
@@ -210,47 +219,38 @@ export default function (pi: ExtensionAPI) {
 			].join("\n");
 		}
 
-		for (const [provider, id] of modelCandidates) {
-			const model = getModel(provider, id);
-			if (!model) continue;
-			const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-			if (!auth.ok) continue;
+		try {
+			const response = await Promise.race([
+				complete(
+					model,
+					{
+						messages: [
+							{
+								role: "user" as const,
+								content: [{ type: "text" as const, text: prompt }],
+								timestamp: Date.now(),
+							},
+						],
+					},
+					{ apiKey: auth.apiKey, headers: auth.headers, reasoningEffort: "low" },
+				),
+				new Promise<never>((_, reject) =>
+					setTimeout(() => reject(new Error(`Timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)), SUMMARY_TIMEOUT_MS),
+				),
+			]);
 
-			try {
-				const response = await Promise.race([
-					complete(
-						model,
-						{
-							messages: [
-								{
-									role: "user" as const,
-									content: [{ type: "text" as const, text: prompt }],
-									timestamp: Date.now(),
-								},
-							],
-						},
-						{ apiKey: auth.apiKey, headers: auth.headers, reasoningEffort: "low" },
-					),
-					new Promise<never>((_, reject) =>
-						setTimeout(() => reject(new Error(`Timed out after ${SUMMARY_TIMEOUT_MS / 1000}s`)), SUMMARY_TIMEOUT_MS),
-					),
-				]);
+			const text = response.content
+				.filter((c): c is { type: "text"; text: string } => c.type === "text")
+				.map((c) => c.text)
+				.join("")
+				.trim();
 
-				const text = response.content
-					.filter((c): c is { type: "text"; text: string } => c.type === "text")
-					.map((c) => c.text)
-					.join("")
-					.trim();
-
-				return text || null;
-			} catch (err) {
-				const msg = err instanceof Error ? err.message : String(err);
-				ctx.ui.setWidget("branch-context", [`⚠️ ${provider}/${id}: ${msg} — trying next model...`]);
-				continue;
-			}
+			return text || null;
+		} catch (err) {
+			const msg = err instanceof Error ? err.message : String(err);
+			ctx.ui.setWidget("branch-context", [`⚠️ ${resolved.provider}/${resolved.id}: ${msg}`]);
+			return null;
 		}
-
-		return null;
 	}
 
 	async function listLocalBranches(): Promise<string[]> {

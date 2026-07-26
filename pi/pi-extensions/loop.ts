@@ -9,6 +9,7 @@
 import { Type } from "@sinclair/typebox";
 import { complete, type Api, type Model, type UserMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionSwitchEvent } from "@earendil-works/pi-coding-agent";
+import { resolveToolModel } from "./lib/tool-model-config";
 import { compact } from "@earendil-works/pi-coding-agent";
 import { Container, type SelectItem, SelectList, Text } from "@earendil-works/pi-tui";
 import { DynamicBorder } from "@earendil-works/pi-coding-agent";
@@ -32,7 +33,9 @@ const LOOP_PRESETS = [
 
 const LOOP_STATE_ENTRY = "loop-state";
 
-const HAIKU_MODEL_ID = "claude-haiku-4-5";
+const LOOP_DEFAULTS = [
+	["anthropic", "claude-haiku-4-5"],
+] as const;
 
 const SUMMARY_SYSTEM_PROMPT = `You summarize loop breakout conditions for a status widget.
 Return a concise phrase (max 6 words) that says when the loop should stop.
@@ -90,16 +93,16 @@ async function selectSummaryModel(
 ): Promise<{ model: Model<Api>; apiKey: string } | null> {
 	if (!ctx.model) return null;
 
-	if (ctx.model.provider === "anthropic") {
-		const haikuModel = ctx.modelRegistry.find("anthropic", HAIKU_MODEL_ID);
-		if (haikuModel) {
-			const apiKey = await ctx.modelRegistry.getApiKey(haikuModel);
-			if (apiKey) {
-				return { model: haikuModel, apiKey };
-			}
+	const resolved = await resolveToolModel("loop", ctx, LOOP_DEFAULTS);
+	if (resolved) {
+		const model = ctx.modelRegistry.find(resolved.provider, resolved.id);
+		if (model) {
+			const apiKey = await ctx.modelRegistry.getApiKey(model);
+			if (apiKey) return { model, apiKey };
 		}
 	}
 
+	// Fall back to the session model
 	const apiKey = await ctx.modelRegistry.getApiKey(ctx.model);
 	if (!apiKey) return null;
 	return { model: ctx.model, apiKey };

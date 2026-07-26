@@ -14,8 +14,9 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { resolveToolModel } from "./lib/tool-model-config";
 
-const LIGHT_MODEL_CANDIDATES = [
+const LIGHT_MODEL_DEFAULTS = [
 	["anthropic", "claude-haiku-4-5"],
 	["openai-codex", "gpt-5.4-mini"],
 	["openai-codex", "gpt-5.3-codex-spark"],
@@ -203,12 +204,8 @@ export default function (pi: ExtensionAPI) {
 async function findLightModel(
 	ctx: ExtensionContext,
 ): Promise<{ provider: string; id: string } | undefined> {
-	for (const [provider, id] of LIGHT_MODEL_CANDIDATES) {
-		const model = ctx.modelRegistry.find(provider, id);
-		if (!model) continue;
-		const auth = await ctx.modelRegistry.getApiKeyAndHeaders(model);
-		if (auth.ok) return { provider, id };
-	}
+	const resolved = await resolveToolModel("auto-commit", ctx, LIGHT_MODEL_DEFAULTS);
+	if (resolved) return resolved;
 	// Fall back to session model if no light model available
 	return ctx.model ? { provider: ctx.model.provider, id: ctx.model.id } : undefined;
 }

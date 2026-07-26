@@ -35,6 +35,9 @@ type ToolModelsConfig = Record<string, ToolModelConfig>;
 let _config: ToolModelsConfig | undefined;
 let _configLoaded = false;
 
+/** Registry of tool names that have called resolveToolModel (auto-discovered). */
+const _knownTools = new Set<string>();
+
 function loadConfig(): ToolModelsConfig {
     if (!_configLoaded) {
         try {
@@ -64,6 +67,7 @@ export async function resolveToolModel(
     ctx: ExtensionContext,
     defaultCandidates: ReadonlyArray<readonly [string, string]>,
 ): Promise<{ provider: string; id: string } | undefined> {
+    _knownTools.add(toolName);
     const config = loadConfig();
 
     // Build the candidate list: config entry first, then defaults.
@@ -133,28 +137,15 @@ async function toolModelsUI(ctx: ExtensionCommandContext): Promise<void> {
     }
 
     while (true) {
-        const toolNames = Object.keys(config).sort();
-
-        if (toolNames.length === 0) {
-            const add = await ctx.ui.confirm(
-                "No tool models configured",
-                "Add a tool model entry?",
-            );
-            if (!add) return;
-            const name = await ctx.ui.input("Tool name (e.g. branch-context):");
-            if (!name?.trim()) return;
-            const modelKey = await pickModel(ctx, modelChoices);
-            if (!modelKey) return;
-            if (modelKey === "__defaults__") continue;
-            const [provider, ...idParts] = modelKey.split("/");
-            config[name.trim()] = { provider, id: idParts.join("/") };
-            writeConfig(config);
-            continue;
-        }
+        // Tool list = union of config entries + auto-discovered tools
+        const allToolNames = new Set([...Object.keys(config), ..._knownTools]);
+        const toolNames = [...allToolNames].sort();
 
         const items: SelectItem[] = toolNames.map((name) => {
             const entry = config[name];
-            const label = `${name} → ${entry.provider}/${entry.id}`;
+            const label = entry
+                ? `${name} → ${entry.provider}/${entry.id}`
+                : `${name} → (defaults)`;
             return { value: name, label };
         });
 
@@ -163,8 +154,11 @@ async function toolModelsUI(ctx: ExtensionCommandContext): Promise<void> {
             container.addChild(
                 new Text(theme.fg("accent", theme.bold("Tool Model Configuration")), 1, 1),
             );
+            const hint = toolNames.length > 0
+                ? "Enter: change model  Del: revert to defaults  Esc: done"
+                : "No tools discovered yet. Run a session first, or Esc to exit.";
             container.addChild(
-                new Text(theme.fg("dim", "Enter: change model  Del: remove  a: add tool  Esc: done"), 1, 0),
+                new Text(theme.fg("dim", hint), 1, 0),
             );
 
             const list = new SelectList(items, Math.min(items.length + 3, 16), {
@@ -178,20 +172,15 @@ async function toolModelsUI(ctx: ExtensionCommandContext): Promise<void> {
             list.onSelect = (item) => done(item.value);
             list.onCancel = () => done(null);
 
-            // Capture keypresses before list for Delete and 'a'
+            // Intercept Delete/Backspace to revert to defaults
             const origHandleInput = list.handleInput.bind(list);
             list.handleInput = (data: string) => {
                 if (data === "\x7f" || data === "\b") {
-                    // Delete/Backspace — remove selected tool
                     const active = list.filteredItems[list.selectedIndex];
-                    if (active) {
+                    if (active && config[active.value]) {
                         done(`__delete__:${active.value}`);
                         return;
                     }
-                }
-                if (data === "a" || data === "n") {
-                    done("__add__");
-                    return;
                 }
                 origHandleInput(data);
                 tui.requestRender();
@@ -214,18 +203,6 @@ async function toolModelsUI(ctx: ExtensionCommandContext): Promise<void> {
         });
 
         if (selected === null) return; // Esc
-
-        if (selected === "__add__") {
-            const name = await ctx.ui.input("Tool name (e.g. my-extension):");
-            if (!name?.trim()) continue;
-            const modelKey = await pickModel(ctx, modelChoices);
-            if (!modelKey) continue;
-            if (modelKey === "__defaults__") continue;
-            const [provider, ...idParts] = modelKey.split("/");
-            config[name.trim()] = { provider, id: idParts.join("/") };
-            writeConfig(config);
-            continue;
-        }
 
         if (selected.startsWith("__delete__:")) {
             const toolName = selected.slice("__delete__:".length);

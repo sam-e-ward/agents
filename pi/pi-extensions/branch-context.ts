@@ -183,10 +183,10 @@ export default function (pi: ExtensionAPI) {
 
 	async function summariseDiff(info: ContextInfo, ctx: ExtensionContext): Promise<string | null> {
 		const modelCandidates = [
+			["deepseek", "deepseek-v4-flash"],
+			["openrouter", "deepseek/deepseek-v4-flash"],
 			["anthropic", "claude-haiku-4-5"],
 			["openai-codex", "gpt-5.4-mini"],
-			["openai-codex", "gpt-5.3-codex-spark"],
-			["anthropic", "claude-3-5-haiku-latest"],
 		];
 
 		let prompt: string;

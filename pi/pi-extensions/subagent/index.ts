@@ -23,6 +23,14 @@ import { type ExtensionAPI, getMarkdownTheme } from "@earendil-works/pi-coding-a
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "@sinclair/typebox";
 import { type AgentConfig, type AgentScope, discoverAgents } from "./agents.js";
+import {
+	classifyTask,
+	configureModelDefaults,
+	formatModelSelection,
+	selectModelForTask,
+	type Complexity,
+	type ModelSelection,
+} from "./model-selection.js";
 
 const MAX_PARALLEL_TASKS = 8;
 const MAX_CONCURRENCY = 4;
@@ -148,6 +156,7 @@ interface SingleResult {
 	stderr: string;
 	usage: UsageStats;
 	model?: string;
+	complexity?: Complexity;
 	stopReason?: string;
 	errorMessage?: string;
 	step?: number;
@@ -227,6 +236,8 @@ async function runSingleAgent(
 	signal: AbortSignal | undefined,
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
+	delegatedModel: ModelSelection | undefined,
+	complexity: Complexity,
 ): Promise<SingleResult> {
 	const agent = agents.find((a) => a.name === agentName);
 
@@ -245,7 +256,17 @@ async function runSingleAgent(
 	}
 
 	return runSingleAgentWithModel(
-		defaultCwd, agent, agentName, task, cwd, step, signal, onUpdate, makeDetails, agent.model,
+		defaultCwd,
+		agent,
+		agentName,
+		task,
+		cwd,
+		step,
+		signal,
+		onUpdate,
+		makeDetails,
+		delegatedModel ? formatModelSelection(delegatedModel) : agent.model,
+		complexity,
 	);
 }
 
@@ -260,6 +281,7 @@ async function runSingleAgentWithModel(
 	onUpdate: OnUpdateCallback | undefined,
 	makeDetails: (results: SingleResult[]) => SubagentDetails,
 	model: string | undefined,
+	complexity: Complexity,
 ): Promise<SingleResult> {
 	const args: string[] = ["--mode", "json", "-p", "--no-session"];
 	if (model) args.push("--model", model);
@@ -277,6 +299,7 @@ async function runSingleAgentWithModel(
 		stderr: "",
 		usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
 		model,
+		complexity,
 		step,
 	};
 
@@ -455,11 +478,19 @@ export default function (pi: ExtensionAPI) {
 		});
 	});
 
+	pi.registerCommand("subagent-models", {
+		description: "Configure low, med, and high subagent model defaults",
+		handler: async (_args, ctx) => {
+			await configureModelDefaults(ctx);
+		},
+	});
+
 	pi.registerTool({
 		name: "subagent",
 		label: "Subagent",
 		description: [
-			"Delegate tasks to specialized subagents with isolated context.",
+			"Delegate tasks to specialized subagents with isolated context. Tasks are classified as low, med, or high complexity.",
+			"Interactive sessions let the user choose a scoped model for each delegation; non-interactive sessions use the configured complexity default.",
 			"Modes: single (agent + task), parallel (tasks array), chain (sequential with {previous} placeholder).",
 			'Default agent scope is "user" (from ~/.pi/agent/agents).',
 			'To enable project-local agents in .pi/agents, set agentScope: "both" (or "project").',
@@ -547,6 +578,8 @@ export default function (pi: ExtensionAPI) {
 							}
 						: undefined;
 
+					const complexity = classifyTask(taskWithContext);
+					const delegation = await selectModelForTask(ctx, taskWithContext, complexity);
 					const result = await runSingleAgent(
 						ctx.cwd,
 						agents,
@@ -557,6 +590,8 @@ export default function (pi: ExtensionAPI) {
 						signal,
 						chainUpdate,
 						makeDetails("chain"),
+						delegation.selection,
+						complexity,
 					);
 					results.push(result);
 
@@ -591,6 +626,12 @@ export default function (pi: ExtensionAPI) {
 						details: makeDetails("parallel")([]),
 					};
 
+				const delegations = [];
+				for (const task of params.tasks) {
+					const complexity = classifyTask(task.task);
+					delegations.push(await selectModelForTask(ctx, task.task, complexity));
+				}
+
 				// Track all results for streaming updates
 				const allResults: SingleResult[] = new Array(params.tasks.length);
 
@@ -604,6 +645,7 @@ export default function (pi: ExtensionAPI) {
 						messages: [],
 						stderr: "",
 						usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
+						complexity: delegations[i].complexity,
 					};
 				}
 
@@ -637,6 +679,8 @@ export default function (pi: ExtensionAPI) {
 							}
 						},
 						makeDetails("parallel"),
+						delegations[index].selection,
+						delegations[index].complexity,
 					);
 					allResults[index] = result;
 					emitParallelUpdate();
@@ -661,6 +705,8 @@ export default function (pi: ExtensionAPI) {
 			}
 
 			if (params.agent && params.task) {
+				const complexity = classifyTask(params.task);
+				const delegation = await selectModelForTask(ctx, params.task, complexity);
 				const result = await runSingleAgent(
 					ctx.cwd,
 					agents,
@@ -671,6 +717,8 @@ export default function (pi: ExtensionAPI) {
 					signal,
 					onUpdate,
 					makeDetails("single"),
+					delegation.selection,
+					complexity,
 				);
 				const isError = result.exitCode !== 0 || result.stopReason === "error" || result.stopReason === "aborted";
 				if (isError) {

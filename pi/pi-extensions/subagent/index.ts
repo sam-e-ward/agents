@@ -626,7 +626,7 @@ export default function (pi: ExtensionAPI) {
 						details: makeDetails("parallel")([]),
 					};
 
-				const delegations = [];
+				const delegations: Array<{ selection?: ModelSelection; complexity: Complexity }> = [];
 				for (const task of params.tasks) {
 					const complexity = classifyTask(task.task);
 					delegations.push(await selectModelForTask(ctx, task.task, complexity));

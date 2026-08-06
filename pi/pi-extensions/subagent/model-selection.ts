@@ -76,8 +76,8 @@ export function classifyTask(task: string): Complexity {
 	const highCount = normalized.match(highSignals)?.length ?? 0;
 	const lowCount = normalized.match(lowSignals)?.length ?? 0;
 
-	if (highCount >= 2 || (highCount > 0 && normalized.length > 180)) return "high";
-	if (highCount === 0 && lowCount > 0 && normalized.length < 220) return "low";
+	if (highCount > 0) return "high";
+	if (lowCount > 0 && normalized.length < 220) return "low";
 	return "med";
 }
 
@@ -90,11 +90,16 @@ export async function selectModelForTask(
 	if (options.length === 0) return { complexity };
 
 	const defaults = await loadDefaults();
-	const defaultOption = findDefault(options, defaults, complexity, ctx);
-	if (defaultOption && !defaults[complexity]) {
-		defaults[complexity] = { model: defaultOption.model, thinkingLevel: defaultOption.thinkingLevel };
-		await saveDefaults(defaults);
+	let changed = false;
+	for (const level of COMPLEXITIES) {
+		const fallback = findDefault(options, defaults, level, ctx);
+		if (fallback && !defaults[level]) {
+			defaults[level] = { model: fallback.model, thinkingLevel: fallback.thinkingLevel };
+			changed = true;
+		}
 	}
+	if (changed) await saveDefaults(defaults);
+	const defaultOption = findDefault(options, defaults, complexity, ctx);
 	if (!defaultOption || ctx.mode !== "tui") {
 		return { selection: defaultOption, complexity };
 	}
@@ -175,6 +180,7 @@ export async function configureModelDefaults(ctx: ExtensionContext): Promise<voi
 	const defaults = await loadDefaults();
 	for (const complexity of COMPLEXITIES) {
 		const defaultOption = findDefault(options, defaults, complexity, ctx)!;
+		defaults[complexity] ??= { model: defaultOption.model, thinkingLevel: defaultOption.thinkingLevel };
 		const choice = await ctx.ui.custom<string | null>((tui, theme, _keybindings, done) => {
 			const container = new Container();
 			container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));

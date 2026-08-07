@@ -190,7 +190,13 @@ export async function configureModelDefaults(ctx: ExtensionContext): Promise<voi
 				label: option.label,
 				description: option.description,
 			}));
-			const list = new SelectList(items, Math.min(items.length, 8));
+			const list = new SelectList(items, Math.min(items.length, 8), {
+				selectedPrefix: (text) => theme.fg("accent", text),
+				selectedText: (text) => theme.fg("accent", text),
+				description: (text) => theme.fg("muted", text),
+				scrollInfo: (text) => theme.fg("dim", text),
+				noMatch: (text) => theme.fg("warning", text),
+			});
 			list.setSelectedIndex(items.findIndex((item) => item.value === formatModelSelection(defaultOption)));
 			list.onSelect = (item) => done(item.value);
 			list.onCancel = () => done(null);

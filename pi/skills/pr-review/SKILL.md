@@ -1,6 +1,6 @@
 ---
 name: pr-review
-description: Four-stage PR review combining high-level aims, structural analysis (based on A Philosophy of Software Design), bug detection, and root-cause correlation. Use when reviewing pull requests or branches.
+description: Four-stage PR review combining high-level aims, structural analysis (based on A Philosophy of Software Design), evidence-led bug detection, and root-cause correlation. Use when reviewing pull requests or branches; use bug-hunter alone for a focused bug-only review.
 ---
 
 # PR Review
@@ -109,24 +109,9 @@ If the structure is clean, say so explicitly and note what's done well.
 
 ## Stage 3 — Bugs
 
-Look for actual defects. Not style issues — things that would cause wrong behaviour at runtime.
+Load and execute the [bug-hunter](../bug-hunter/SKILL.md) skill against the same review range. Its evidence-led bug review is the complete procedure for this stage.
 
-- Off-by-one errors, null/undefined access, race conditions
-- Incorrect boolean logic, missing edge cases
-- Resource leaks (unclosed handles, missing cleanup)
-- Security issues (injection, auth bypass, data exposure)
-- Broken error handling (swallowed exceptions, wrong error types)
-- API contract violations (wrong return type, missing required fields)
-
-For each bug:
-
-```
-**[BUG] Title** — `path/to/file.ts:42`
-<What breaks and under what conditions>
-→ Fix: <concrete fix>
-```
-
-If no bugs found, say so.
+Carry its qualifying `[BUG]` findings into this review unchanged. If it reports no qualifying defect, say so. Do not add style or structural comments here; those belong to Stage 2.
 
 ---
 

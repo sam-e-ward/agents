@@ -19,6 +19,9 @@ and stays separate from this skill).
   pages, read threads that need in-page vote counts, handle JS-rendered pages.
 - **`scout.mjs`** (in this skill directory) — domain-agnostic community-signal
   lookups. See below.
+- **`redlib.mjs`** (in this skill directory) — resilient Reddit access via the
+  Redlib front-end ecosystem; used automatically by `scout.mjs` as a fallback.
+  Run `node redlib.mjs probe` to see live instances.
 
 ## Source tiers
 
@@ -35,8 +38,37 @@ specs, academic papers/preprints, source repos. Trusted on authority of origin
 | Hacker News | `node scout.mjs search "<topic>" --sources hn` | Algolia API, reliable, any topic that's been submitted (not just tech) |
 | Stack Exchange network | `node scout.mjs search "<topic>" --se-site <site1,site2>` | Not just `stackoverflow` — pick the SE site matching the topic domain (table below). Reliable, no auth. |
 | lobste.rs | `node scout.mjs lobsters <shortid>` | No search API — find the shortid via `native-web-search "site:lobste.rs <topic>"`, then pull comments/scores directly |
-| Reddit | `node scout.mjs search "<topic>" --sources reddit` | **Best-effort.** Reddit's JSON API frequently 403s from cloud/datacenter IPs regardless of headers. If it fails, fall back to `native-web-search "site:reddit.com/r/... <topic>"` + `web-browser` to read the thread and vote counts in-page. |
+| Reddit | `node scout.mjs search "<topic>" --sources reddit` | **Auto-fallbacks.** Reddit's JSON API 403s from cloud/datacenter IPs; `scout.mjs` transparently retries via the Redlib mirror ecosystem (below) and marks results `[via redlib]`. |
 | Bluesky | `node scout.mjs search "<topic>" --bluesky` | **Best-effort**, same IP-blocking caveat as Reddit. Lower-trust signal anyway (likes/reposts, not a real vote) — use only as a minor corroborating data point. |
+
+### Reddit access: the Redlib fallback chain
+
+Reddit blocks automated access at every layer (JSON API, web UI, and reader
+proxies like r.jina.ai all 403 from datacenter IPs). Redlib instances are
+independently hosted Reddit front-ends that serve the *same* content as plain
+parseable HTML, including vote counts, and some run on networks Reddit hasn't
+blocked. `scout.mjs` handles this automatically; for direct control:
+
+```bash
+node redlib.mjs probe                                        # list working instances
+node redlib.mjs search "<topic>" [--subreddit <s>] [--limit N] [--json]
+node redlib.mjs comments <post_id> --subreddit <s> [--limit N] [--json]
+```
+
+Resolution order (what `scout.mjs` does under the hood):
+
+1. Direct `reddit.com` JSON API — usually 403 from here.
+2. Fetch the official Redlib instance list (github raw JSON) and probe each in
+   parallel, rejecting 403s and JS challenge pages (Anubis, Cloudflare).
+3. Use the first working instance for the search/comment request.
+
+Check status at any time with `node redlib.mjs probe` (lists the instances
+that are currently serving content).
+
+If every instance is blocked or challenged, the request fails loudly with the
+combined error messages — do **not** treat that as "no community discussion
+found". As a last resort, use `native-web-search "site:reddit.com ..."` +
+`web-browser`, but expect Reddit's own pages to be blocked too.
 
 Common SE sites by topic (pick 1–2 relevant ones, full list at
 stackexchange.com/sites):
@@ -113,10 +145,11 @@ rather than trusting the search snippet.
 
 4. **Community traction pass** — run `scout.mjs search` (HN + relevant SE
    site(s), Reddit/Bluesky best-effort) for the topic itself, and again for
-   any specific Tier C article that's driving a conclusion. If Reddit/Bluesky
-   API calls fail, don't silently skip — fall back to
-   `native-web-search "site:reddit.com ..."` and read the thread with
-   `web-browser` if the vote count matters.
+   any specific Tier C article that's driving a conclusion. Reddit access
+   auto-falls back to Redlib; if you need raw control use `node redlib.mjs
+   search "<topic>"` / `node redlib.mjs comments <id> --subreddit <s>`. Only
+   if Redlib is also down should you fall back to site-scoped
+   `native-web-search` + `web-browser` to read a thread.
 
 5. **Deep dive with web-browser** as needed: verify a primary source directly,
    check real publish/update dates, or read a thread that needs in-page vote
@@ -158,6 +191,7 @@ _As of <date>_
 - Prefer 2–3 well-corroborated findings over an exhaustive but shallow list.
 - If community-vetted sources return nothing, say so explicitly before
   relying on Tier C/D.
-- If Reddit/Bluesky scripted access fails (likely — see Tier B table), don't
-  give up on that source category; fall back to the documented site-scoped +
-  browser path before concluding "no community discussion found."
+- If Reddit scripted access fails, `scout.mjs` already retries via the Redlib
+  mirror ecosystem; only if that also fails should you fall back to site-scoped
+  search + `web-browser` — never conclude "no community discussion found"
+  without checking `node redlib.mjs probe` for live instances first.

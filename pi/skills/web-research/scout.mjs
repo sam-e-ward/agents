@@ -14,6 +14,8 @@
 //
 // No dependencies. Requires Node >= 18 (global fetch).
 
+import { search as redlibSearch, comments as redlibComments } from "./redlib.mjs";
+
 const args = process.argv.slice(2);
 const cmd = args[0];
 
@@ -84,45 +86,61 @@ async function hnComments(storyId) {
 
 // ---- Reddit — public JSON search, no auth required in principle, but Reddit
 // aggressively blocks many datacenter/cloud IP ranges with a 403 regardless of
-// headers. Treat this as best-effort: if it fails, fall back to site-scoped
-// native-web-search + web-browser (see SKILL.md).
+// headers. On failure we transparently fall back to the Redlib front-end
+// ecosystem (see redlib.mjs), which serves the same content as parseable HTML.
 async function searchReddit(query) {
-  const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=${limit}`;
-  const data = await getJson(url);
-  return (data.data?.children || []).map((c) => {
-    const d = c.data;
-    return {
-      source: "reddit",
-      title: d.title,
-      url: `https://reddit.com${d.permalink}`,
-      subreddit: d.subreddit_name_prefixed,
-      id: d.id,
-      signal: d.score,
-      comments: d.num_comments,
-      date: new Date(d.created_utc * 1000).toISOString().slice(0, 10),
-    };
-  });
+  try {
+    const url = `https://www.reddit.com/search.json?q=${encodeURIComponent(query)}&sort=relevance&limit=${limit}`;
+    const data = await getJson(url);
+    return (data.data?.children || []).map((c) => {
+      const d = c.data;
+      return {
+        source: "reddit",
+        title: d.title,
+        url: `https://reddit.com${d.permalink}`,
+        subreddit: d.subreddit_name_prefixed,
+        id: d.id,
+        signal: d.score,
+        comments: d.num_comments,
+        date: new Date(d.created_utc * 1000).toISOString().slice(0, 10),
+      };
+    });
+  } catch (e) {
+    try {
+      return await redlibSearch(query, { limit });
+    } catch (e2) {
+      throw new Error(`reddit JSON blocked (${e.message}); redlib fallback failed (${e2.message})`);
+    }
+  }
 }
 
 async function redditComments(postId, subreddit) {
   if (!subreddit) throw new Error("reddit comments require --subreddit <name>");
-  const url = `https://www.reddit.com/r/${subreddit}/comments/${postId}.json?limit=${limit}`;
-  const data = await getJson(url);
-  const post = data[0]?.data?.children?.[0]?.data;
-  const top = (data[1]?.data?.children || [])
-    .filter((c) => c.kind === "t1" && c.data?.body)
-    .slice(0, limit);
-  return {
-    title: post?.title,
-    url: post ? `https://reddit.com${post.permalink}` : null,
-    score: post?.score,
-    comments: top.map((c) => ({
-      author: c.data.author,
-      score: c.data.score,
-      replies: (c.data.replies?.data?.children || []).length,
-      text: truncate(stripHtml(c.data.body)),
-    })),
-  };
+  try {
+    const url = `https://www.reddit.com/r/${subreddit}/comments/${postId}.json?limit=${limit}`;
+    const data = await getJson(url);
+    const post = data[0]?.data?.children?.[0]?.data;
+    const top = (data[1]?.data?.children || [])
+      .filter((c) => c.kind === "t1" && c.data?.body)
+      .slice(0, limit);
+    return {
+      title: post?.title,
+      url: post ? `https://reddit.com${post.permalink}` : null,
+      score: post?.score,
+      comments: top.map((c) => ({
+        author: c.data.author,
+        score: c.data.score,
+        replies: (c.data.replies?.data?.children || []).length,
+        text: truncate(stripHtml(c.data.body)),
+      })),
+    };
+  } catch (e) {
+    try {
+      return await redlibComments(postId, subreddit, limit);
+    } catch (e2) {
+      throw new Error(`reddit JSON blocked (${e.message}); redlib fallback failed (${e2.message})`);
+    }
+  }
 }
 
 // ---- Stack Exchange network — any site, not just programming ones ----
@@ -197,8 +215,10 @@ function printSearch(results) {
       console.log(`     article:    ${r.url}`);
       console.log(`     discussion: ${r.discussion}   (comments: node scout.mjs hn ${r.id})`);
     } else if (r.source === "reddit") {
-      console.log(`[reddit ${r.subreddit}] score ${r.signal}, ${r.comments} comments (${r.date}) — ${r.title}`);
+      const via = r.via === "redlib" ? " [via redlib]" : "";
+      console.log(`[reddit ${r.subreddit}]${via} score ${r.signal}, ${r.comments} comments (${r.date}) — ${r.title}`);
       console.log(`     ${r.url}   (comments: node scout.mjs reddit ${r.id} --subreddit ${r.subreddit.replace(/^r\//, "")})`);
+      if (r.mirror) console.log(`     mirror: ${r.mirror}`);
     } else if (r.source === "bluesky") {
       console.log(`[bluesky @${r.author}] ${r.signal} likes+reposts, ${r.comments} replies (${r.date}) — ${r.title}`);
       console.log(`     ${r.url}`);

@@ -223,7 +223,7 @@ type YNU = "Y" | "N" | "UNSURE";
  * - Both Y  -> amend
  * - Both N  -> new commit
  * - Anything else -> prompt the user, defaulting to amend when there's a Y and
- *   no N, otherwise defaulting to new.
+ *   no N, otherwise defaulting to new. Uses that default after 30 seconds.
  */
 async function decideAmend(
 	pi: ExtensionAPI,
@@ -249,8 +249,9 @@ async function decideAmend(
 	const options = defaultAmend ? [amendOption, newOption] : [newOption, amendOption];
 
 	const choice = await ctx.ui.select(
-		`Previous auto-commit exists. Same scope? ${q1}. Message still fits? ${q2}.`,
+		`Previous auto-commit exists. Same scope? ${q1}. Message still fits? ${q2}. Auto-selecting ${defaultAmend ? "Amend" : "New commit"} after 30s.`,
 		options,
+		{ timeout: 30_000 },
 	);
 	return choice?.startsWith("Amend") ?? defaultAmend;
 }

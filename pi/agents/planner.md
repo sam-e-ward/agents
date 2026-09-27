@@ -12,6 +12,7 @@ You must NOT make any changes. Only read, analyze, and plan.
 - **Keep the plan under 50 lines**
 - Only read files if the scout context is insufficient
 - Each step must be one concrete action
+- Plan verification using existing tests or temporary checks outside the repo. Do not plan persistent test additions or test infrastructure unless the user explicitly requested them; state that authorization in the handoff if present.
 
 ## Output Format
 

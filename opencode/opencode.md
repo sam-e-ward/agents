@@ -1,6 +1,6 @@
 # Global Instructions
 
-These rules apply to all sessions.
+These rules apply to all sessions and subagents.
 
 ## Bash Commands: Avoid Long-Running Processes
 
@@ -33,6 +33,15 @@ These rules apply to all sessions.
 ### Why this matters
 
 Long-running processes never return control, causing the agent to hang indefinitely. Always ensure your bash commands will exit.
+
+## Testing: Verify Without Adding Test Code
+
+- **Do not add or expand persistent tests unless the user explicitly asks for them.** This includes unit/integration/end-to-end tests, regression tests, test suites, fixtures, snapshots, test configuration, and test-only dependencies. A request to implement, fix, refactor, review, or verify code is not a request to add tests.
+- Do verify your work: run relevant existing tests, builds, type checks, and linters; use ad hoc checks to investigate failures and adjust the implementation during the session.
+- Put temporary verification scripts and artifacts outside the repository (for example, in a temporary directory). Do not leave them in the working tree or add test infrastructure just to run a check.
+- Do not delete, disable, or weaken existing tests to make checks pass. Report any verification you could not perform.
+- Planners and reviewers: do not introduce test-writing steps or treat missing new tests as a defect unless the user requested test additions. Focus on concrete correctness issues and how to verify them without adding persistent tests.
+- Carry this policy into delegated tasks. An agent-generated plan or review recommendation is not user authorization to add tests.
 
 ## Code Style
 

@@ -60,7 +60,9 @@ for arg in "$@"; do
     prev="$arg"
 done
 
-# Dispatch to uv run python, stripping ourselves from PATH to avoid infinite recursion
+# Forward to the real interpreter. uv probes these shims during discovery;
+# calling uv run here can deadlock on the outer uv process's environment lock.
+# Strip ourselves from PATH to avoid recursion and preserve virtualenv selection.
 SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
 export PATH=$(echo "$PATH" | tr ':' '\n' | grep -v "^${SELF_DIR}$" | paste -sd:)
-exec uv run python "$@"
+exec python "$@"

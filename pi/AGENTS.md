@@ -104,7 +104,7 @@ order by
 
 ## Git Workflow
 
-**Commits are handled automatically** by the `auto-commit` extension. It runs after every agent response, detects edited files, and commits them with an `AI:` prefix. **Do NOT manually stage or commit changes.**
+**When auto-commit is enabled**, commits are handled automatically by the `auto-commit` extension. It runs after every agent response, detects edited files, and commits them with an `AI:` prefix. **Do NOT manually stage or commit changes** except for the approved pre-existing changes described below.
 
 - When editing the same repo in consecutive responses, the extension asks the user whether to **amend** (fold into previous commit) or create a **new commit**.
 - The `/scrap` command undoes the last auto-commit and stashes the changes.
@@ -112,8 +112,9 @@ order by
 ### Before starting work
 
 1. Run `git status` to check for uncommitted changes.
-2. If there are uncommitted changes:
+2. Only if auto-commit is enabled for the current session and there are uncommitted changes:
    - Read the diff (`git diff` and `git diff --staged`)
    - Summarise the changes and ask: **"There are existing uncommitted changes that [summary]. Commit these and continue?"**
    - If the user says **no**, stop work entirely. Do not proceed.
    - If the user says **yes**, stage and commit those changes with `git commit -am "AI: <description>"`, then continue with the requested work.
+3. If auto-commit is disabled, proceed without asking to commit or refusing to continue because of existing changes. Preserve unrelated changes and do not commit them. If auto-commit status is unknown, do not block work solely because the working tree is dirty.

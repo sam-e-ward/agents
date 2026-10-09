@@ -309,7 +309,7 @@ export default function (pi: ExtensionAPI) {
 				overlay: true,
 				overlayOptions: {
 					anchor: "center",
-					width: "90%",
+					width: "100%",
 					maxHeight: "90%",
 					minWidth: 60,
 				},

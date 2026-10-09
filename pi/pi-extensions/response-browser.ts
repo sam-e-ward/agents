@@ -1,5 +1,5 @@
 /**
- * Response Browser — PageUp/PageDown to flip between agent responses.
+ * Response Browser — Shift+Up/Down to flip between agent responses.
  *
  * A "response" is the last assistant message before the next user message
  * (i.e., the final reply in each turn before the user typed again).
@@ -11,8 +11,10 @@
  *
  * Once open:
  *   ↑/↓                   — scroll within the current response
- *   Shift+Up / PageUp     — previous response
- *   Shift+Down / PageDown — next response (close if at latest)
+ *   PageUp/PageDown       — scroll 10 lines
+ *   ←/→                   — collapse/expand the user prompt
+ *   Shift+Up              — previous response
+ *   Shift+Down            — next response (close if at latest)
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -133,6 +135,7 @@ export default function (pi: ExtensionAPI) {
 			(tui, theme, _keybindings, done) => {
 				const mdTheme = getMarkdownTheme();
 				let scrollOffset = 0;
+				let promptExpanded = false;
 				let totalContentLines = 0; // track for clamping
 				let viewportLines = 0; // how many content lines fit
 
@@ -149,19 +152,38 @@ export default function (pi: ExtensionAPI) {
 							return;
 						}
 
-						// Shift+Up / PageUp — previous response
-						if (matchesKey(data, "shift+up") || matchesKey(data, "pageUp")) {
+						// Shift+Up — previous response
+						if (matchesKey(data, "shift+up")) {
 							if (currentIdx > 0) switchResponse(currentIdx - 1);
 							return;
 						}
 
-						// Shift+Down / PageDown — next response (or close at end)
-						if (matchesKey(data, "shift+down") || matchesKey(data, "pageDown")) {
+						// Shift+Down — next response (or close at end)
+						if (matchesKey(data, "shift+down")) {
 							if (currentIdx < responses.length - 1) {
 								switchResponse(currentIdx + 1);
 							} else {
 								done();
 							}
+							return;
+						}
+
+						if (matchesKey(data, "left") || matchesKey(data, "right")) {
+							const expanded = matchesKey(data, "right");
+							if (promptExpanded !== expanded) {
+								promptExpanded = expanded;
+								scrollOffset = 0;
+								tui.requestRender();
+							}
+							return;
+						}
+
+						// PageUp/PageDown — scroll ten lines, staying within this response
+						if (matchesKey(data, "pageUp") || matchesKey(data, "pageDown")) {
+							const delta = matchesKey(data, "pageUp") ? -10 : 10;
+							const maxScroll = Math.max(0, totalContentLines - viewportLines);
+							scrollOffset = Math.max(0, Math.min(maxScroll, scrollOffset + delta));
+							tui.requestRender();
 							return;
 						}
 
@@ -210,7 +232,7 @@ export default function (pi: ExtensionAPI) {
 							const vis = visibleWidth(s);
 							return s + " ".repeat(Math.max(0, len - vis));
 						};
-						const row = (content: string) => border("│") + " " + pad(content, innerW) + " " + border("│");
+						const row = (content: string) => border("│") + " " + pad(truncateToWidth(content, innerW), innerW) + " " + border("│");
 						const emptyRow = () => border("│") + " ".repeat(innerW + 2) + border("│");
 
 						// Top border with position indicator
@@ -233,7 +255,7 @@ export default function (pi: ExtensionAPI) {
 
 						// User prompt that triggered this response
 						const prompt = truncatePrompt(resp.userPrompt, innerW - 4);
-						lines.push(row(theme.fg("dim", "▸ ") + theme.fg("muted", prompt)));
+						lines.push(row(theme.fg("dim", promptExpanded ? "▾ Prompt" : "▸ ") + (promptExpanded ? "" : theme.fg("muted", prompt))));
 
 						// Separator
 						lines.push(border("├") + border("─".repeat(innerW + 2)) + border("┤"));
@@ -241,10 +263,15 @@ export default function (pi: ExtensionAPI) {
 						// Response content — render as markdown
 						const md = new Markdown(resp.textContent, 0, 0, mdTheme);
 						const mdLines = md.render(innerW);
+						if (promptExpanded) {
+							// Keep long prompts in the scrollable viewport rather than growing the overlay.
+							const promptLines = new Markdown(resp.userPrompt, 0, 0, mdTheme).render(innerW);
+							mdLines.unshift(...promptLines, theme.fg("border", "─".repeat(innerW)));
+						}
 
-						// Chrome = top border + header + prompt + separator + bottom (empty + help + border) = 8 lines
+						// Match the overlay's 90% height limit, leaving room for its chrome.
 						const chromeLines = 8;
-						const maxContentLines = Math.max(5, (tui as any).height ? (tui as any).height - chromeLines : 40);
+						const maxContentLines = Math.max(1, Math.floor(tui.terminal.rows * 0.9) - chromeLines);
 
 						// Update scroll state for input handler
 						totalContentLines = mdLines.length;
@@ -267,8 +294,9 @@ export default function (pi: ExtensionAPI) {
 						const scrollHint = canScroll
 							? theme.fg("dim", ` [${scrollOffset + 1}–${Math.min(scrollOffset + viewportLines, totalContentLines)}/${totalContentLines}]`)
 							: "";
-						const help = theme.fg("dim", "↑↓ scroll • ⇧↑↓ prev/next • esc close") + scrollHint;
+						const help = theme.fg("dim", "↑↓ scroll • PgUp/Dn 10 lines • ←→ prompt");
 						lines.push(row(help));
+						lines.push(row(theme.fg("dim", "⇧↑↓ prev/next • esc close") + scrollHint));
 						lines.push(border("╰") + border("─".repeat(innerW + 2)) + border("╯"));
 
 						return lines;

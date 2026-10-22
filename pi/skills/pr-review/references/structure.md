@@ -190,6 +190,7 @@ Use this as a checklist. Only cite flags that genuinely appear in the PR.
 | **Hard to pick name** | Difficulty naming hints at unclear responsibility |
 | **Hard to describe** | Difficulty writing a short comment hints at design problem |
 | **Non-obvious code** | Meaning not apparent from a quick read |
+| **Single-use global** | A (usually ALL_CAPS) variable defined at the top of the file but used in only one place. Instead, make it an argument of the function that uses it, with the value as its default |
 
 ---
 

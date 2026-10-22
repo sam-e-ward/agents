@@ -92,6 +92,7 @@ Work through these questions in order. Skip any that genuinely don't apply.
 - Hard to pick name
 - Hard to describe
 - Non-obvious code
+- Single-use global (module-level constant used in only one place; make it a defaulted argument instead)
 
 ### Output format for Stage 2
 

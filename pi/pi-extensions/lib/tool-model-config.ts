@@ -35,8 +35,13 @@ type ToolModelsConfig = Record<string, ToolModelConfig>;
 let _config: ToolModelsConfig | undefined;
 let _configLoaded = false;
 
-/** Registry of tool names that have called resolveToolModel (auto-discovered). */
-const _knownTools = new Set<string>();
+/** Built-in consumers must be configurable before their first model request. */
+const _knownTools = new Set<string>([
+    "auto-commit",
+    "branch-context",
+    "loop",
+    "session-summary",
+]);
 
 function loadConfig(): ToolModelsConfig {
     if (!_configLoaded) {
@@ -137,7 +142,7 @@ async function toolModelsUI(ctx: ExtensionCommandContext): Promise<void> {
     }
 
     while (true) {
-        // Tool list = union of config entries + auto-discovered tools
+        // Include built-in consumers, saved config entries, and dynamically discovered tools.
         const allToolNames = new Set([...Object.keys(config), ..._knownTools]);
         const toolNames = [...allToolNames].sort();
 

@@ -78,7 +78,7 @@ Providers:
   openai-codex - OpenAI Codex (requires ChatGPT Plus)
   openrouter   - OpenRouter Responses API (requires openrouter API key)
   deepseek     - DeepSeek (uses DuckDuckGo fallback since no native web search)
-  duckduckgo   - Free DuckDuckGo search (no API key needed, always works)
+  duckduckgo   - DuckDuckGo Lite/HTML (no API key; may be rate-limited or blocked)
 
 Examples:
   node search.mjs "latest python release" --purpose "update dependency notes"
@@ -653,6 +653,28 @@ async function runOpenRouterSearch({ model, apiKey, query, purpose, timeoutMs, b
 
 // ── DuckDuckGo fallback (free, no API key needed) ──────────────────────
 
+function decodeSearchText(value) {
+	return value.replace(/<[^>]+>/g, "").replace(/&(#(?:x[0-9a-f]+|\d+)|amp|quot|apos|lt|gt);/gi, (entity, code) => {
+		const named = { amp: "&", quot: '"', apos: "'", lt: "<", gt: ">" };
+		if (!code.startsWith("#")) return named[code.toLowerCase()] || entity;
+		const number = code[1].toLowerCase() === "x" ? parseInt(code.slice(2), 16) : parseInt(code.slice(1), 10);
+		return number > 0 && number <= 0x10ffff ? String.fromCodePoint(number) : entity;
+	});
+}
+
+function searchResultUrl(href) {
+	try {
+		const url = new URL(href.replace(/&amp;/g, "&"), "https://duckduckgo.com");
+		const isDdg = (host) => host === "duckduckgo.com" || host.endsWith(".duckduckgo.com");
+		const target = isDdg(url.hostname) ? url.searchParams.get("uddg") : null;
+		const canonical = target ? new URL(target) : url;
+		return ["http:", "https:"].includes(canonical.protocol) && !isDdg(canonical.hostname)
+			? canonical.href : null;
+	} catch {
+		return null;
+	}
+}
+
 /**
  * Extract search results from DuckDuckGo's lite HTML endpoint.
  * The lite endpoint (https://lite.duckduckgo.com/lite/) returns a simple
@@ -670,86 +692,64 @@ function parseDuckDuckGoLite(html) {
 	let match;
 
 	while ((match = linkRegex.exec(html)) !== null) {
-		const url = match[1].trim();
-		const title = match[2].replace(/<[^>]+>/g, "").trim();
+		const url = searchResultUrl(match[1].trim());
+		const title = decodeSearchText(match[2]).trim();
 
-		if (!title) continue;
+		if (!title || !url) continue;
 
 		// Skip sponsored links (followed by "Sponsored link" text)
-		const afterLink = html.slice(match.index + match[0].length, match.index + match[0].length + 200);
-		if (afterLink.includes("Sponsored link")) continue;
-
-		// Skip DuckDuckGo internal links
-		if (url.startsWith("https://duckduckgo.com/") || url.startsWith("//duckduckgo.com/")) continue;
+		const afterLink = html.slice(match.index + match[0].length, linkRegex.lastIndex + 2000);
+		if (/Sponsored link/.test(afterLink.slice(0, 200))) continue;
 
 		// Find the snippet - it's in the next <td class='result-snippet'>
 		const snippetRegex = /<td\s+class='result-snippet'[^>]*>([\s\S]*?)<\/td>/i;
 		const snippetMatch = snippetRegex.exec(afterLink);
-		const snippet = snippetMatch ? snippetMatch[1].replace(/<[^>]+>/g, "").trim() : "";
+		const snippet = snippetMatch ? decodeSearchText(snippetMatch[1]).replace(/\s+/g, " ").trim() : "";
 
-		results.push({"title": title, "url": url, "snippet": snippet});
+		results.push({ title, url, snippet });
 	}
 
 	return results;
 }
 
 async function runDuckDuckGoSearch({ query, purpose, timeoutMs }) {
-	const signal = typeof AbortSignal !== "undefined" && AbortSignal.timeout ? AbortSignal.timeout(timeoutMs) : undefined;
+	let liteError;
+	try {
+		const res = await fetch("https://lite.duckduckgo.com/lite/", {
+			method: "POST",
+			headers: {
+				"user-agent": randomUA(),
+				"content-type": "application/x-www-form-urlencoded",
+				accept: "text/html",
+			},
+			body: new URLSearchParams({ q: query }).toString(),
+			signal: AbortSignal.timeout(timeoutMs),
+		});
+		if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
-	const ua = randomUA();
+		const results = parseDuckDuckGoLite(await res.text());
+		if (!results.length) throw new Error("no parseable results (possible challenge or changed markup)");
 
-	const res = await fetch("https://lite.duckduckgo.com/lite/", {
-		method: "POST",
-		headers: {
-			"user-agent": ua,
-			"content-type": "application/x-www-form-urlencoded",
-			accept: "text/html",
-		},
-		body: new URLSearchParams({ q: query }).toString(),
-		signal,
-	});
-
-	if (!res.ok) {
-		// If lite returns 503 or similar, try the full HTML endpoint as backup
-		if (res.status >= 500 || res.status === 429 || res.status === 403) {
-			return await fallbackSearch(query, purpose);
+		const lines = [`## Search Results: ${query}`, `> Purpose: ${purpose}`, ""];
+		for (const [index, result] of results.slice(0, 10).entries()) {
+			lines.push(`### ${index + 1}. ${result.title}`);
+			if (result.snippet) lines.push(`   ${result.snippet}`);
+			lines.push(`   <${result.url}>`, "");
 		}
-		throw new Error(`DuckDuckGo lite request failed (${res.status})`);
+		lines.push("---", `Results from DuckDuckGo. ${results.length} results found. Visit the linked URLs for full details.`);
+		return lines.join("\n");
+	} catch (error) {
+		liteError = error;
 	}
-
-	const html = await res.text();
-	const results = parseDuckDuckGoLite(html);
-
-	if (results.length === 0) {
-		return `No search results found for "${query}".`;
+	try {
+		return await fallbackSearch(query, purpose, timeoutMs);
+	} catch (error) {
+		throw new Error(`DuckDuckGo unavailable: Lite ${liteError.message}; HTML ${error.message}. Try native search or another source; do not interpret this as zero results.`);
 	}
-
-	// Build a concise summary
-	const lines = [];
-	lines.push(`## Search Results: ${query}`);
-	lines.push(`> Purpose: ${purpose}`);
-	lines.push("");
-
-	const topResults = results.slice(0, 10);
-	for (let i = 0; i < topResults.length; i++) {
-		const r = topResults[i];
-		lines.push(`### ${i + 1}. ${r.title}`);
-		if (r.snippet) lines.push(`   ${r.snippet.replace(/\n/g, " ")}`);
-		if (r.url) lines.push(`   <${r.url}>`);
-		lines.push("");
-	}
-
-	lines.push("---");
-	lines.push(`Results from DuckDuckGo. ${results.length} results found. Visit the linked URLs for full details.`);
-
-	return lines.join("\n");
 }
 
-/**
- * Fallback search when DuckDuckGo lite is unavailable.
- * Uses SearXNG or a basic HTML scraping approach.
- */
-async function fallbackSearch(query, purpose) {
+/** Fall back to the full HTML endpoint when Lite is unavailable. */
+async function fallbackSearch(query, purpose, timeoutMs) {
 	// Try the full DDG HTML search as a last resort
 	const ua = randomUA();
 	const res = await fetch(
@@ -759,7 +759,7 @@ async function fallbackSearch(query, purpose) {
 				"user-agent": ua,
 				accept: "text/html",
 			},
-			signal: AbortSignal.timeout(15000),
+			signal: AbortSignal.timeout(timeoutMs),
 		},
 	);
 
@@ -771,10 +771,7 @@ async function fallbackSearch(query, purpose) {
 
 	// Parse DDG HTML search results
 	const results = [];
-	const linkRegex = /<a[^>]*rel="nofollow"[^>]*class="[^"]*"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-	const snippetRegex = /<a[^>]*class="result__snippet"[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
-
-	// Simpler: extract result__body blocks
+	// Extract result__body blocks.
 	const blockRegex = /<div[^>]*class="result__body"[^>]*>([\s\S]*?)<\/div>\s*<\/div>/gi;
 	let blockMatch;
 
@@ -786,17 +783,18 @@ async function fallbackSearch(query, purpose) {
 		// Snippet
 		const sMatch = /<a[^>]*class="result__snippet"[^>]*>([\s\S]*?)<\/a>/i.exec(block);
 
-		if (tMatch) {
+		const url = tMatch ? searchResultUrl(tMatch[1].trim()) : null;
+		if (url) {
 			results.push({
-				title: tMatch[2].replace(/<[^>]+>/g, "").trim(),
-				url: tMatch[1].trim(),
-				snippet: sMatch ? sMatch[1].replace(/<[^>]+>/g, "").trim() : "",
+				title: decodeSearchText(tMatch[2]).trim(),
+				url,
+				snippet: sMatch ? decodeSearchText(sMatch[1]).replace(/\s+/g, " ").trim() : "",
 			});
 		}
 	}
 
 	if (results.length === 0) {
-		return `DuckDuckGo returned no results for "${query}".`;
+		throw new Error("no parseable results (possible challenge or changed markup)");
 	}
 
 	const lines = [];
@@ -869,46 +867,61 @@ async function main() {
 		return;
 	}
 
-	// For native-search providers, load pi-ai and resolve credentials
-	const piAi = await loadPiAi();
-	const model = pickFastModel(provider, args.model, piAi);
-	const { apiKey, accountId } = await resolveApiKey(provider, auth, authPath, piAi);
+	// An explicit provider should fail visibly; auto may try DDG if native search is unavailable.
+	let modelId;
+	let usedProvider = provider;
+	try {
+		const piAi = await loadPiAi();
+		const model = pickFastModel(provider, args.model, piAi);
+		modelId = model.id;
+		const { apiKey, accountId } = await resolveApiKey(provider, auth, authPath, piAi);
 
-	if (provider === "openai-codex") {
-		text = await runCodexSearch({
-			model: model.id,
-			apiKey,
-			accountId,
-			query: args.query,
-			purpose: args.purpose,
-			timeoutMs: args.timeoutMs,
-			baseUrl: model.baseUrl,
-		});
-	} else if (provider === "openrouter") {
-		text = await runOpenRouterSearch({
-			model: model.id,
-			apiKey,
-			query: args.query,
-			purpose: args.purpose,
-			timeoutMs: args.timeoutMs,
-			baseUrl: model.baseUrl,
-		});
-	} else {
-		text = await runAnthropicSearch({
-			model: model.id,
-			apiKey,
-			query: args.query,
-			purpose: args.purpose,
-			timeoutMs: args.timeoutMs,
-		});
+		if (provider === "openai-codex") {
+			text = await runCodexSearch({
+				model: model.id,
+				apiKey,
+				accountId,
+				query: args.query,
+				purpose: args.purpose,
+				timeoutMs: args.timeoutMs,
+				baseUrl: model.baseUrl,
+			});
+		} else if (provider === "openrouter") {
+			text = await runOpenRouterSearch({
+				model: model.id,
+				apiKey,
+				query: args.query,
+				purpose: args.purpose,
+				timeoutMs: args.timeoutMs,
+				baseUrl: model.baseUrl,
+			});
+		} else {
+			text = await runAnthropicSearch({
+				model: model.id,
+				apiKey,
+				query: args.query,
+				purpose: args.purpose,
+				timeoutMs: args.timeoutMs,
+			});
+		}
+	} catch (error) {
+		if (args.provider && args.provider !== "auto") throw error;
+		console.error(`warning: ${provider} search failed (${error.message}); trying DuckDuckGo`);
+		try {
+			text = await runDuckDuckGoSearch(args);
+		} catch (fallbackError) {
+			throw new Error(`${provider} search failed (${error.message}); ${fallbackError.message}`);
+		}
+		usedProvider = "duckduckgo";
+		modelId = "duckduckgo-web";
 	}
 
 	if (args.json) {
 		console.log(
 			JSON.stringify(
 				{
-					provider,
-					model: model.id,
+					provider: usedProvider,
+					model: modelId,
 					query: args.query,
 					purpose: args.purpose,
 					result: text,
@@ -920,8 +933,8 @@ async function main() {
 		return;
 	}
 
-	console.log(`Provider: ${provider}`);
-	console.log(`Model: ${model.id}`);
+	console.log(`Provider: ${usedProvider}`);
+	console.log(`Model: ${modelId}`);
 	console.log("");
 	console.log(text);
 }

@@ -55,7 +55,10 @@ function parseNum(s) {
 // ---------------------------------------------------------------- instances
 
 export async function fetchInstances() {
-  const res = await fetch(INSTANCES_URL, { headers: { "User-Agent": UA } });
+  const res = await fetch(INSTANCES_URL, {
+    headers: { "User-Agent": UA },
+    signal: AbortSignal.timeout(8000),
+  });
   if (!res.ok) throw new Error(`instance list ${res.status} for ${INSTANCES_URL}`);
   const data = await res.json();
   return (data.instances || [])
@@ -80,6 +83,7 @@ export async function probeInstances(timeoutMs = 6000) {
           redirect: "follow",
           headers: { "User-Agent": UA },
         });
+        if (!res.ok) return { url, ok: false };
         const text = await res.text();
         const challenged = CHALLENGE_MARKERS.test(text.slice(0, 4000));
         // A real redlib page links to /r/... or carries its own settings UI.
@@ -114,7 +118,7 @@ async function fetchOne(instance, path, timeoutMs) {
       headers: { "User-Agent": UA },
     });
     const text = await res.text();
-    if (!res.ok || CHALLENGE_MARKERS.test(text.slice(0, 4000))) {
+    if (!res.ok || CHALLENGE_MARKERS.test(text.slice(0, 4000)) || !/<(?:div|article)[^>]*class="(?:post|comment)/i.test(text)) {
       throw new Error(`${instance} blocked for ${path} (HTTP ${res.status})`);
     }
     return { html: text, instance };

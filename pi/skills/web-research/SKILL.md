@@ -19,9 +19,9 @@ and stays separate from this skill).
   pages, read threads that need in-page vote counts, handle JS-rendered pages.
 - **`scout.mjs`** (in this skill directory) — domain-agnostic community-signal
   lookups. See below.
-- **`redlib.mjs`** (in this skill directory) — resilient Reddit access via the
-  Redlib front-end ecosystem; used automatically by `scout.mjs` as a fallback.
-  Run `node redlib.mjs probe` to see live instances.
+- **`redlib.mjs`** (in this skill directory) — best-effort Reddit access via
+  third-party Redlib front-ends; used automatically by `scout.mjs` as a fallback.
+  Run `node redlib.mjs probe` to see currently reachable instances.
 
 ## Source tiers
 
@@ -35,19 +35,18 @@ specs, academic papers/preprints, source repos. Trusted on authority of origin
 
 | Source | Command | Notes |
 |---|---|---|
-| Hacker News | `node scout.mjs search "<topic>" --sources hn` | Algolia API, reliable, any topic that's been submitted (not just tech) |
-| Stack Exchange network | `node scout.mjs search "<topic>" --se-site <site1,site2>` | Not just `stackoverflow` — pick the SE site matching the topic domain (table below). Reliable, no auth. |
+| Hacker News | `node scout.mjs search "<topic>" --sources hn` | Algolia API, independent of DDG/Reddit; only topics submitted there |
+| Stack Exchange network | `node scout.mjs search "<topic>" --se-site <site1,site2>` | Not just `stackoverflow` — pick the SE site matching the topic domain (table below). Public API, subject to quota/rate limits. |
 | lobste.rs | `node scout.mjs lobsters <shortid>` | No search API — find the shortid via `native-web-search "site:lobste.rs <topic>"`, then pull comments/scores directly |
-| Reddit | `node scout.mjs search "<topic>" --sources reddit` | **Auto-fallbacks.** Reddit's JSON API 403s from cloud/datacenter IPs; `scout.mjs` transparently retries via the Redlib mirror ecosystem (below) and marks results `[via redlib]`. |
+| Reddit | `node scout.mjs search "<topic>" --sources reddit` | **Best-effort.** Direct JSON can 403; Redlib fallback can also be down/challenged. Check `errors` in `--json` output; never equate failure with no discussion. |
 | Bluesky | `node scout.mjs search "<topic>" --bluesky` | **Best-effort**, same IP-blocking caveat as Reddit. Lower-trust signal anyway (likes/reposts, not a real vote) — use only as a minor corroborating data point. |
 
 ### Reddit access: the Redlib fallback chain
 
-Reddit blocks automated access at every layer (JSON API, web UI, and reader
-proxies like r.jina.ai all 403 from datacenter IPs). Redlib instances are
-independently hosted Reddit front-ends that serve the *same* content as plain
-parseable HTML, including vote counts, and some run on networks Reddit hasn't
-blocked. `scout.mjs` handles this automatically; for direct control:
+Reddit often blocks automated requests from datacenter IPs; reader proxies
+and third-party mirrors can be blocked too. Redlib instances may serve Reddit
+content as parseable HTML, but their availability, freshness and markup are
+outside our control. `scout.mjs` handles this automatically; for direct control:
 
 ```bash
 node redlib.mjs probe                                        # list working instances
@@ -58,17 +57,19 @@ node redlib.mjs comments <post_id> --subreddit <s> [--limit N] [--json]
 Resolution order (what `scout.mjs` does under the hood):
 
 1. Direct `reddit.com` JSON API — usually 403 from here.
-2. Fetch the official Redlib instance list (github raw JSON) and probe each in
-   parallel, rejecting 403s and JS challenge pages (Anubis, Cloudflare).
+2. Fetch the Redlib instance list (github raw JSON) and probe each in
+   parallel, rejecting 403s and JS challenge pages (Anubis, Cloudflare). The
+   list itself may be unreachable or contain no usable instances.
 3. Use the first working instance for the search/comment request.
 
-Check status at any time with `node redlib.mjs probe` (lists the instances
-that are currently serving content).
+Check status with `node redlib.mjs probe` (reachable home pages only; a
+specific search or thread can still fail).
 
-If every instance is blocked or challenged, the request fails loudly with the
-combined error messages — do **not** treat that as "no community discussion
-found". As a last resort, use `native-web-search "site:reddit.com ..."` +
-`web-browser`, but expect Reddit's own pages to be blocked too.
+If every instance is blocked or challenged, the request fails — do **not**
+treat that as "no community discussion found". Site-scoped search may discover
+Reddit thread URLs, but is not independent of DDG when using the DDG provider
+and is not proof of the thread's votes or contents. Prefer independent HN/SE
+sources or clearly mark Reddit as unavailable. Do not bypass challenges.
 
 Common SE sites by topic (pick 1–2 relevant ones, full list at
 stackexchange.com/sites):
@@ -139,7 +140,9 @@ rather than trusting the search snippet.
 
 2. **Broad recon** — 2–3 differently-phrased `native-web-search` queries
    (include at least one non-solution-oriented phrasing). Triage every hit
-   into Tier A/B/C/D as you go.
+   into Tier A/B/C/D as you go. If search fails, switch to independent
+   primary/community APIs or an authenticated provider; don't retry the same
+   blocked endpoint indefinitely or claim no results.
 
 3. **Slop filter** — drop or flag Tier D hits using the heuristics above.
 
@@ -148,8 +151,8 @@ rather than trusting the search snippet.
    any specific Tier C article that's driving a conclusion. Reddit access
    auto-falls back to Redlib; if you need raw control use `node redlib.mjs
    search "<topic>"` / `node redlib.mjs comments <id> --subreddit <s>`. Only
-   if Redlib is also down should you fall back to site-scoped
-   `native-web-search` + `web-browser` to read a thread.
+   if Redlib is also down, site-scoped `native-web-search` + `web-browser`
+   may help discover and verify a thread, but both may be blocked too.
 
 5. **Deep dive with web-browser** as needed: verify a primary source directly,
    check real publish/update dates, or read a thread that needs in-page vote
@@ -191,7 +194,7 @@ _As of <date>_
 - Prefer 2–3 well-corroborated findings over an exhaustive but shallow list.
 - If community-vetted sources return nothing, say so explicitly before
   relying on Tier C/D.
-- If Reddit scripted access fails, `scout.mjs` already retries via the Redlib
-  mirror ecosystem; only if that also fails should you fall back to site-scoped
-  search + `web-browser` — never conclude "no community discussion found"
-  without checking `node redlib.mjs probe` for live instances first.
+- If Reddit scripted access fails, `scout.mjs` retries via Redlib. If both
+  fail, report Reddit unavailable and use independent sources; never conclude
+  "no community discussion found" from a failed request. Distinguish `errors`
+  from empty `results` when using `--json`.

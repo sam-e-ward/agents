@@ -46,7 +46,10 @@ function truncate(s, n = 600) {
 }
 
 async function getJson(url, extraHeaders = {}) {
-  const res = await fetch(url, { headers: { "User-Agent": UA, ...extraHeaders } });
+  const res = await fetch(url, {
+    headers: { "User-Agent": UA, ...extraHeaders },
+    signal: AbortSignal.timeout(10000),
+  });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText} for ${url}`);
   return res.json();
 }
@@ -216,8 +219,8 @@ function printSearch(results) {
       console.log(`     discussion: ${r.discussion}   (comments: node scout.mjs hn ${r.id})`);
     } else if (r.source === "reddit") {
       const via = r.via === "redlib" ? " [via redlib]" : "";
-      console.log(`[reddit ${r.subreddit}]${via} score ${r.signal}, ${r.comments} comments (${r.date}) — ${r.title}`);
-      console.log(`     ${r.url}   (comments: node scout.mjs reddit ${r.id} --subreddit ${r.subreddit.replace(/^r\//, "")})`);
+      console.log(`[reddit ${r.subreddit || "unknown"}]${via} score ${r.signal}, ${r.comments} comments (${r.date || "date unknown"}) — ${r.title}`);
+      console.log(`     ${r.url}${r.subreddit ? `   (comments: node scout.mjs reddit ${r.id} --subreddit ${r.subreddit.replace(/^r\//, "")})` : ""}`);
       if (r.mirror) console.log(`     mirror: ${r.mirror}`);
     } else if (r.source === "bluesky") {
       console.log(`[bluesky @${r.author}] ${r.signal} likes+reposts, ${r.comments} replies (${r.date}) — ${r.title}`);
@@ -247,13 +250,14 @@ async function main() {
     results.sort((a, b) => (b.signal ?? 0) - (a.signal ?? 0));
 
     if (asJson) return console.log(JSON.stringify({ results, errors }, null, 2));
-    if (!results.length) {
+    if (!results.length && !errors.length) {
       console.log("No results from community-vetted sources queried here.");
       console.log("Try: different phrasing, --se-site <relevant-se-site>, --bluesky, or fall back to native-web-search");
       console.log("(caveat any generic-web finding as unvetted — see SKILL.md).");
     }
     printSearch(results);
     for (const e of errors) console.error(`warning: ${e}`);
+    if (!results.length && errors.length) console.error("Sources unavailable; this is not evidence that no discussion exists.");
   } else if (cmd === "hn") {
     const out = await hnComments(args[1]);
     if (asJson) return console.log(JSON.stringify(out, null, 2));

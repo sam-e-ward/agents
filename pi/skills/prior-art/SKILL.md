@@ -36,7 +36,7 @@ a matching HN/lobste.rs discussion for community validation.
 
 ### Tier 3 — community sites without direct API access from this box
 
-- **Reddit** (r/ExperiencedDevs, r/softwarearchitecture, r/programming, r/devops, language subs) — direct API is blocked here, but the `web-research` skill's `scout.mjs` auto-falls back to the Redlib front-end ecosystem and returns the same threads with vote counts (marked `[via redlib]`). Use `node ../web-research/redlib.mjs search "<topic>"` / `comments <id> --subreddit <s>` for direct control.
+- **Reddit** (r/ExperiencedDevs, r/softwarearchitecture, r/programming, r/devops, language subs) — direct API often 403s; the `web-research` skill's `scout.mjs` tries Redlib, but instances may also be blocked or challenged. Use `node ../web-research/redlib.mjs probe` to check availability; never infer absence of discussion from a failed fetch.
 - **lobste.rs** — search via `site:lobste.rs`; comments for a story are available as JSON at `https://lobste.rs/s/<id>.json` (includes per-comment `score`)
 
 ## Workflow
@@ -71,15 +71,17 @@ Given a problem/topic:
    pages where you need visible vote counts (Reddit, lobste.rs), use the **web-browser**
    skill — or, for Reddit specifically, the **web-research** skill's Redlib tooling
    (`node ../web-research/redlib.mjs search/comments ...`), which works when both the
-   Reddit API and its own pages are IP-blocked.
+   Reddit API and its own pages may be IP-blocked. DDG site-scoped search can
+   be blocked too; it is not an independent fallback for a DDG failure.
 
 4. **Cross-validate**: for any Tier 2 article that drives a recommendation, search HN for a
    discussion of it (`node scout.mjs search "<article title>"`) and check whether top comments
    affirm or dispute it.
 
 5. **Fallback — generic web search** (allowed, but always caveated): if the tiers above
-   don't cover the topic, use native-web-search without site scoping. Anything sourced this
-   way **must** be labelled as unvetted in your output (see below).
+   don't cover the topic, use native-web-search without site scoping. If search is unavailable,
+   report the limitation and use independent HN/SE APIs or primary docs instead. Anything
+   sourced from generic search **must** be labelled as unvetted in your output (see below).
 
 ## Output format
 

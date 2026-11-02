@@ -1,6 +1,6 @@
 ---
 name: native-web-search
-description: "Trigger native web search. Use when you need quick internet research with concise summaries and full source URLs. Works with any LLM provider via DuckDuckGo fallback."
+description: "Search the web with a supported native provider or best-effort DuckDuckGo fallback. Use for quick research; check URLs and distinguish unavailable search from no results."
 ---
 
 # Native Web Search
@@ -13,12 +13,7 @@ Use this skill to search the web and get concise research summaries with explici
 
 ## Setup
 
-The skill requires `duck-duck-scrape` for the fallback search. This is already installed in `node_modules/`.
-
-If you encounter module errors, run:
-```bash
-cd /path/to/skills/native-web-search && npm install
-```
+DuckDuckGo Lite/HTML uses Node's built-in `fetch` (Node >= 18); no npm install is needed. Native provider search requires compatible pi-ai and valid credentials.
 
 ## Usage
 
@@ -47,9 +42,10 @@ Optional flags:
 The script auto-detects the best search provider:
 
 1. **With Anthropic/OpenRouter/OpenAI-Codex**: Uses the provider's native web search tool (most accurate)
-2. **With DeepSeek/Mistral/other providers**: Falls back to **DuckDuckGo Lite** search (free, no API key needed, always works)
+2. **With DeepSeek/Mistral/other providers**: Tries DuckDuckGo Lite, then DDG HTML (no API key, but both can rate-limit/challenge the same IP).
+3. **In auto mode**, if native search fails (including an incompatible OAuth helper), warns on stderr and tries DDG. Explicit `--provider` failures remain visible.
 
-This means web search works regardless of which LLM provider you're using.
+Neither path guarantees availability. HTTP errors, unparseable/challenge pages and timeouts are **failures**, not evidence of zero results. If DDG is unavailable, try an authenticated native provider, relevant primary-source APIs (`scout.mjs` for HN/Stack Exchange), or browser verification. Do not invent results or imply search coverage when a source failed.
 
 ## Output expectations
 

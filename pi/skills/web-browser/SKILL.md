@@ -25,20 +25,21 @@ Before first use, make sure you have Chrome or Chromium installed:
 ./scripts/start.js --profile --headless  # Profile + headless
 ```
 
-Starts Chrome/Chromium on `:9222` with remote debugging.
+Starts Chrome/Chromium on `:9222` with remote debugging. If one is already running there, `start.js` reuses it; it does not launch another.
 
 - **`--headless`** runs without a visible window — useful on servers or WSL
 - **`CHROME_HEADLESS=1`** env var also forces headless mode
 - **Auto-headless**: if `DISPLAY` isn't set, headless is used automatically
 
-## Stop Chrome
+## Stop Chrome — required cleanup
 
 ```bash
 ./scripts/stop.js
 ```
 
-Gracefully closes all tabs and kills the browser process running on `:9222`.
-Also kills the detached `watch.js` log watcher.
+**Always run `stop.js` when finished with browser work, including after an error or interrupted workflow.** Do not leave a headless browser or log watcher running for the next task. Run it as the final cleanup step, not just when you remember to close tabs. It stops this skill's dedicated browser (profile `~/.cache/scraping`) and detached `watch.js` watcher; it will not kill an unrelated browser on `:9222`.
+
+The browser on `:9222` is shared between agents. If `start.js` says it reused an existing instance, coordinate with any other agent still using it before stopping it; the last agent to finish must run `stop.js`.
 
 ## Navigate
 

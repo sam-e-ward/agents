@@ -1,63 +1,67 @@
 #!/usr/bin/env node
 
-import { execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
+import { existsSync, readFileSync, unlinkSync } from "node:fs";
 import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-const HOME = homedir();
 const PORT = 9222;
+const profileDir = join(homedir(), ".cache/scraping");
+const watcherPath = join(dirname(fileURLToPath(import.meta.url)), "watch.js");
+const watcherPidFile = join(homedir(), ".cache/agent-web/logs/.pid");
 
-async function isDebugEndpointUp() {
+function processes() {
+  return execFileSync("ps", ["-ax", "-o", "pid=", "-o", "command="], {
+    encoding: "utf8",
+  }).split("\n").flatMap((line) => {
+    const match = line.match(/^\s*(\d+)\s+(.+)$/);
+    return match ? [{ pid: Number(match[1]), command: match[2] }] : [];
+  });
+}
+
+function isBrowser(command) {
+  return command.includes(`--remote-debugging-port=${PORT}`) &&
+    command.includes(`--user-data-dir=${profileDir}`) &&
+    !command.includes("--type=");
+}
+
+function isWatcher(command) {
+  return command.includes(watcherPath);
+}
+
+async function terminate(pid, matches) {
+  if (!processes().some((p) => p.pid === pid && matches(p.command))) return;
   try {
-    const response = await fetch(`http://localhost:${PORT}/json/version`);
-    return response.ok;
-  } catch {
-    return false;
+    process.kill(pid, "SIGTERM");
+  } catch (error) {
+    if (error.code !== "ESRCH") throw error;
+  }
+  for (let i = 0; i < 20; i++) {
+    if (!processes().some((p) => p.pid === pid && matches(p.command))) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  if (processes().some((p) => p.pid === pid && matches(p.command))) {
+    process.kill(pid, "SIGKILL");
   }
 }
 
-if (!(await isDebugEndpointUp())) {
-  console.log(`✓ No browser running on :${PORT}`);
-  process.exit(0);
-}
+const running = processes();
+const browsers = running.filter((p) => isBrowser(p.command));
+const watchers = running.filter((p) => isWatcher(p.command));
 
-// Gracefully close via CDP
-try {
-  const targets = await (await fetch(`http://localhost:${PORT}/json/list`)).json();
-  for (const target of targets) {
-    if (target.type === "page") {
-      const ws = new WebSocket(
-        `ws://localhost:${PORT}/devtools/page/${target.id}`,
-      );
-      await new Promise((resolve) => {
-        ws.onopen = () => {
-          ws.send(JSON.stringify({ id: 1, method: "Page.close" }));
-          ws.close();
-          resolve();
-        };
-        ws.onerror = () => resolve();
-      });
-    }
+// Stop only this skill's dedicated browser, never another process using :9222.
+for (const browser of browsers) await terminate(browser.pid, isBrowser);
+for (const watcher of watchers) await terminate(watcher.pid, isWatcher);
+
+if (existsSync(watcherPidFile)) {
+  // The watcher may have exited without removing its pid file.
+  const pid = Number(readFileSync(watcherPidFile, "utf8").trim());
+  if (!processes().some((p) => p.pid === pid && isWatcher(p.command))) {
+    unlinkSync(watcherPidFile);
   }
-} catch {
-  // fall through to force-kill
 }
 
-// Kill the browser process
-try {
-  if (process.platform === "darwin") {
-    execSync(`pkill -f "remote-debugging-port=${PORT}"`, { stdio: "pipe" });
-  } else {
-    execSync(`pkill -f "remote-debugging-port=${PORT}"`, { stdio: "pipe" });
-  }
-} catch {
-  // process may already be gone
-}
-
-// Kill the detached watcher
-try {
-  execSync(`pkill -f "watch.js"`, { stdio: "pipe" });
-} catch {
-  // watcher may already be gone
-}
-
-console.log(`✓ Browser on :${PORT} stopped`);
+console.log(browsers.length || watchers.length
+  ? `✓ Browser on :${PORT} and log watcher stopped`
+  : `✓ No skill browser or log watcher running`);

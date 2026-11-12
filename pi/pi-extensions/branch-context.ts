@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { complete } from "@earendil-works/pi-ai";
@@ -8,6 +9,42 @@ import { Container, type SettingItem, SettingsList, Text } from "@earendil-works
 
 const MAX_DIFF_BYTES = 40000; // keep diff under context limits
 const SUMMARY_TIMEOUT_MS = 15000; // max time to wait for LLM summary
+const MAX_STAT_CHARS = 4000; // cap on the diffstat injected into context
+const MAX_CACHED_SUMMARIES = 100;
+
+// Summaries are cached globally, keyed by a hash of branch + diff, so reopening
+// a session on an unchanged branch doesn't hit the LLM again.
+const SUMMARY_CACHE_PATH = path.join(getAgentDir(), "branch-context-summaries.json");
+
+function readSummaryCache(): Record<string, string> {
+	try {
+		const parsed = JSON.parse(fs.readFileSync(SUMMARY_CACHE_PATH, "utf-8"));
+		return parsed && typeof parsed === "object" ? parsed : {};
+	} catch {
+		return {};
+	}
+}
+
+function writeCachedSummary(key: string, value: string): void {
+	try {
+		const cache = readSummaryCache();
+		delete cache[key];
+		cache[key] = value; // re-insert so the newest entries are last
+		const keys = Object.keys(cache);
+		for (const old of keys.slice(0, Math.max(0, keys.length - MAX_CACHED_SUMMARIES))) delete cache[old];
+		fs.mkdirSync(path.dirname(SUMMARY_CACHE_PATH), { recursive: true });
+		fs.writeFileSync(SUMMARY_CACHE_PATH, JSON.stringify(cache, null, 2));
+	} catch {
+		// Best-effort persistence; ignore write failures.
+	}
+}
+
+function summaryCacheKey(info: { currentBranch: string; isTrunk: boolean; diff: string }): string {
+	return crypto
+		.createHash("sha256")
+		.update(`${info.currentBranch}\0${info.isTrunk}\0${info.diff}`)
+		.digest("hex");
+}
 
 // Branches treated as candidate bases when a repo has no saved selection.
 const DEFAULT_BASES = ["master", "main"];
@@ -40,6 +77,7 @@ interface ContextInfo {
 	base: string | null;
 	commitCount: number;
 	diff: string;
+	stat: string;
 	hasUncommitted: boolean;
 	isTrunk: boolean;
 }
@@ -147,15 +185,29 @@ export default function (pi: ExtensionAPI) {
 
 		if (!diff) return null;
 
+		const stat = await getStat(bestBase && !isTrunk ? bestBase : "HEAD");
+
 		return {
 			currentBranch,
 			parentBranch,
 			base: bestBase,
 			commitCount,
 			diff: diff.length > MAX_DIFF_BYTES ? diff.slice(0, MAX_DIFF_BYTES) + "\n\n[diff truncated]" : diff,
+			stat,
 			hasUncommitted: !!uncommittedDiff,
 			isTrunk,
 		};
+	}
+
+	/** Diffstat of tracked changes against `ref`, plus the list of untracked files. */
+	async function getStat(ref: string): Promise<string> {
+		const { stdout: tracked } = await git("diff", "--stat", "--stat-width=120", ref);
+		const { stdout: untracked } = await git("ls-files", "--others", "--exclude-standard");
+		const untrackedLines = untracked
+			? ["Untracked files:", ...untracked.split("\n").map((f) => `  ${f.trim()}`)]
+			: [];
+		const stat = [tracked, ...untrackedLines].filter(Boolean).join("\n");
+		return stat.length > MAX_STAT_CHARS ? stat.slice(0, MAX_STAT_CHARS) + "\n[stat truncated]" : stat;
 	}
 
 	/** Get just the untracked file pseudo-diffs (used for feature branch mode). */
@@ -192,6 +244,16 @@ export default function (pi: ExtensionAPI) {
 	] as const;
 
 	async function summariseDiff(info: ContextInfo, ctx: ExtensionContext): Promise<string | null> {
+		const cacheKey = summaryCacheKey(info);
+		const cached = readSummaryCache()[cacheKey];
+		if (cached) return cached;
+
+		const fresh = await summariseDiffWithModel(info, ctx);
+		if (fresh) writeCachedSummary(cacheKey, fresh);
+		return fresh;
+	}
+
+	async function summariseDiffWithModel(info: ContextInfo, ctx: ExtensionContext): Promise<string | null> {
 		const resolved = await resolveToolModel("branch-context", ctx, BRANCH_CONTEXT_DEFAULTS);
 		if (!resolved) return null;
 
@@ -409,15 +471,15 @@ export default function (pi: ExtensionAPI) {
 		}
 		if (summary) parts.push(`Summary: ${summary}`);
 		parts.push("");
-		parts.push(contextInfo.isTrunk ? "Uncommitted diff:" : "Diff from branch point to current working state:");
-		parts.push(contextInfo.diff);
+		parts.push(contextInfo.isTrunk ? "Uncommitted changes (stat):" : "Changes from branch point to current working state (stat):");
+		parts.push(contextInfo.stat);
 
 		return {
 			message: {
 				customType: "branch-context",
 				content: [
 					`Here's what's been done${contextInfo.isTrunk ? " (uncommitted)" : " on this branch"} so far:\n\n${parts.join("\n")}`,
-					"\nUse this as background context for where the work stands. Don't comment on it unless asked.",
+					"\n\nUse this as background context for where the work stands. Run git diff for details. Don't comment on it unless asked.",
 				].join(""),
 				display: false,
 			},

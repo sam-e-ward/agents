@@ -1,3 +1,4 @@
+import { infraToolsEnabled } from "../../../pi-extensions/lib/enabled-repos";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -230,6 +231,8 @@ function truncateResult(text: string, max_lines = 400): { text: string; truncate
 // ── Extension entry point ──────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	if (!infraToolsEnabled()) return;
+
 	// Guard: don't let the LLM bypass vm_query/vm_labels with raw curl/bash queries
 	pi.events.emit("command-guard:register", {
 		pattern: "\\bcurl\\b.*\\blocalhost[:/].*8481\\b",

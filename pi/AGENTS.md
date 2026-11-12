@@ -2,119 +2,26 @@
 
 These rules apply to ALL sessions and subagents.
 
-## Bash Commands: Avoid Long-Running Processes
+## Bash: never run commands that don't exit
 
-**CRITICAL:** Never run commands that don't exit on their own. This includes:
+No dev servers, watchers, `docker compose up` (without `-d`), or anything that waits for input or changes. To verify, use one-shot commands (`npm run build`, `npx vitest run`). If you must start a server, background it, check it with curl, then kill it, or use `timeout 5 <cmd> || true`.
 
-- `npm run dev` / `yarn dev` / `pnpm dev` — dev servers
-- `npm start` / `yarn start` — app servers
-- `node server.js` / `python manage.py runserver` — any server
-- `ng serve` / `vite` / `webpack serve` — build watchers with servers
-- `docker compose up` (without `-d`) — container orchestration
-- Any command that watches files and waits for changes
+## Testing: verify without adding test code
 
-### What to do instead
+- Do not add or expand persistent tests (unit/integration/e2e, fixtures, snapshots, test config, test-only deps) unless the user explicitly asks. Implement/fix/refactor/review requests are not requests for tests.
+- Do verify your work: run existing tests, builds, type checks and linters, and use ad hoc checks.
+- Put temporary verification scripts outside the repo (e.g. a temp dir); don't leave them in the working tree.
+- Never delete, disable, or weaken existing tests to make checks pass. Report any verification you couldn't perform.
+- Planners/reviewers: don't add test-writing steps or flag missing new tests unless tests were requested. Carry this policy into delegated tasks.
 
-1. **If you need to verify a build runs:** Use `npm run build` (compiles and exits)
-2. **If you need to run tests:** Use `npm test` or `npx vitest run` (not `vitest watch`)
-3. **If you must start a dev server:** Use background mode with timeout:
-   ```bash
-   timeout 5 npm run dev 2>&1 || true
-   ```
-   Or redirect and background:
-   ```bash
-   nohup npm run dev > /dev/null 2>&1 &
-   sleep 2
-   ```
-4. **If you need to verify the app loads:** Start it in background, check with curl, then kill it:
-   ```bash
-   npm run dev &
-   DEV_PID=$!
-   sleep 3
-   curl -s http://localhost:5173 | head -20
-   kill $DEV_PID
-   ```
-
-### Why this matters
-
-Long-running processes never return control, causing the agent to hang indefinitely. Always ensure your bash commands will exit.
-
-## Testing: Verify Without Adding Test Code
-
-- **Do not add or expand persistent tests unless the user explicitly asks for them.** This includes unit/integration/end-to-end tests, regression tests, test suites, fixtures, snapshots, test configuration, and test-only dependencies. A request to implement, fix, refactor, review, or verify code is not a request to add tests.
-- Do verify your work: run relevant existing tests, builds, type checks, and linters; use ad hoc checks to investigate failures and adjust the implementation during the session.
-- Put temporary verification scripts and artifacts outside the repository (for example, in a temporary directory). Do not leave them in the working tree or add test infrastructure just to run a check.
-- Do not delete, disable, or weaken existing tests to make checks pass. Report any verification you could not perform.
-- Planners and reviewers: do not introduce test-writing steps or treat missing new tests as a defect unless the user requested test additions. Focus on concrete correctness issues and how to verify them without adding persistent tests.
-- Carry this policy into delegated tasks. An agent-generated plan or review recommendation is not user authorization to add tests.
-
-## Code Style
+## Code style
 
 - Match existing patterns in the codebase
 - Keep functions small and focused
 - Use descriptive variable names
 - Add comments only for non-obvious logic
+- SQL: read the `sql-style` skill before writing SQL
 
-### SQL
+## Git
 
-- All lowercase — keywords, functions, aliases, types (`select`, `count`, `coalesce`, `integer`)
-- 4-space indentation
-- Clause keywords (`select`, `from`, `where`, `group by`, `order by`, `having`, `limit`) on their own line at base indent; their contents indented one level below
-- Joins at the same indent level as the first table inside the `from` block
-- One column/expression per line in `select`, `order by`, `group by`
-- One condition per line in `where` (with `and`/`or` at line start, indented)
-- Trailing commas
-- Quoted aliases in lowercase (`"bad fit"`, not `"Bad fit"`)
-- `distinct on` indented under `select`, not on the keyword line
-- CTEs: `with name as (` then body indented, closing `)` at CTE indent level
-
-Example:
-
-```sql
-with team_sizes as (
-    select
-        distinct on (c.organisation_id)
-        c.organisation_id,
-        te.teamsize
-    from
-        trial_enquiry te
-        join contact c on c.rt_id = te.rt_id
-    where
-        te.teamsize is not null
-    order by
-        c.organisation_id,
-        te.created_at asc
-)
-select
-    to_char(md.initial_contact_date, 'yyyy-mm') as date_created_month,
-    count(*) filter (where o.lead_status = 'bad_fit') as "bad fit",
-    count(*) as "grand total"
-from
-    merged_deal md
-    join organisation o on o.id = md.organisation_id
-    left join team_sizes ts on ts.organisation_id = md.organisation_id
-group by
-    grouping sets (
-        (to_char(md.initial_contact_date, 'yyyy-mm')),
-        ()
-    )
-order by
-    date_created_month nulls first
-```
-
-## Git Workflow
-
-**When auto-commit is enabled**, commits are handled automatically by the `auto-commit` extension. It runs after every agent response, detects edited files, and commits them with an `AI:` prefix. **Do NOT manually stage or commit changes** except for the approved pre-existing changes described below.
-
-- When editing the same repo in consecutive responses, the extension asks the user whether to **amend** (fold into previous commit) or create a **new commit**.
-- The `/scrap` command undoes the last auto-commit and stashes the changes.
-
-### Before starting work
-
-1. Run `git status` to check for uncommitted changes.
-2. Only if auto-commit is enabled for the current session and there are uncommitted changes:
-   - Read the diff (`git diff` and `git diff --staged`)
-   - Summarise the changes and ask: **"There are existing uncommitted changes that [summary]. Commit these and continue?"**
-   - If the user says **no**, stop work entirely. Do not proceed.
-   - If the user says **yes**, stage and commit those changes with `git commit -am "AI: <description>"`, then continue with the requested work.
-3. If auto-commit is disabled, proceed without asking to commit or refusing to continue because of existing changes. Preserve unrelated changes and do not commit them. If auto-commit status is unknown, do not block work solely because the working tree is dirty.
+Preserve unrelated uncommitted changes and never commit them yourself. If auto-commit is active, the system prompt says so; otherwise commit only when asked.

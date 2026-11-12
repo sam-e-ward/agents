@@ -1,3 +1,4 @@
+import { infraToolsEnabled } from "../../../pi-extensions/lib/enabled-repos";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@sinclair/typebox";
 import { StringEnum } from "@earendil-works/pi-ai";
@@ -600,6 +601,8 @@ function actionSetHost(host: string): string {
 // ── Extension entry point ──────────────────────────────────────────────
 
 export default function (pi: ExtensionAPI) {
+	if (!infraToolsEnabled()) return;
+
 	pi.events.emit("command-guard:register", {
 		pattern: "\\bcurl\\b.*\\bopensearch\\b",
 		reason: "Use the opensearch tool for OpenSearch queries, not curl/bash.",

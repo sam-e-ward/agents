@@ -194,6 +194,14 @@ export default function (pi: ExtensionAPI) {
 		},
 	});
 
+	// Tell the model about auto-commit only while it's on
+	pi.on("before_agent_start", (event) => {
+		if (!autoCommitEnabled) return;
+		return {
+			systemPrompt: `${event.systemPrompt}\n\nAuto-commit is enabled: edited files are committed automatically with an \`AI:\` prefix after each response. Do not stage or commit manually. If the working tree has unrelated uncommitted changes, leave them alone.`,
+		};
+	});
+
 	// Clear tracking on new session
 	pi.on("session_start", async () => {
 		lastAutoCommit.clear();

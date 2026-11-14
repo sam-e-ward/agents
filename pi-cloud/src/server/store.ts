@@ -270,22 +270,23 @@ export class CloudStore {
 			} finally {
 				closeSync(descriptor);
 			}
+			let stored = revision;
 			try {
 				// A hard link publishes a complete file atomically without replacing an existing blob.
 				linkSync(temporary, destination);
 			} catch (error) {
 				if (!isAlreadyPresent(error)) throw error;
-				const existing = parseRevision(JSON.parse(readFileSync(destination, "utf8")));
-				if (existing.id !== revision.id) throw new Error("Stored revision integrity failure");
-				return existing;
+				stored = parseRevision(JSON.parse(readFileSync(destination, "utf8")));
+				if (stored.id !== revision.id) throw new Error("Stored revision integrity failure");
 			}
+			// Also persist a dangling link recovered after a previous process crashed before fsync.
 			const directory = openSync(this.#blobDirectory, constants.O_RDONLY);
 			try {
 				fsyncSync(directory);
 			} finally {
 				closeSync(directory);
 			}
-			return revision;
+			return stored;
 		} finally {
 			unlinkSync(temporary);
 		}

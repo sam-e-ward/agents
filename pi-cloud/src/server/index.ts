@@ -220,7 +220,7 @@ export async function createCloudServer(options: CloudServerOptions): Promise<Cl
 					clearTimeout(deadline);
 					try {
 						store.close();
-						if (error && error.code !== "ERR_SERVER_NOT_RUNNING") reject(error);
+						if (error && (!("code" in error) || error.code !== "ERR_SERVER_NOT_RUNNING")) reject(error);
 						else resolve();
 					} catch (closeError) {
 						reject(closeError);

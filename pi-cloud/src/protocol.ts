@@ -102,7 +102,7 @@ export function parseSnapshot(snapshot: string): SessionSnapshot {
 	const lines = snapshot.slice(0, -1).split("\n");
 	const entries = lines.map((line) => object(JSON.parse(line), "session entry"));
 	const header = entries.shift();
-	if (!header || header.type !== "session" || !Number.isInteger(header.version) || Number(header.version) < 3) {
+	if (!header || header.type !== "session" || header.version !== 3) {
 		throw new Error("Expected a pi v3 session header (open older sessions in pi to migrate them first)");
 	}
 	text(header.id, "native session ID", 256);

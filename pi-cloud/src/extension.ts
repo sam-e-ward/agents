@@ -58,8 +58,12 @@ export default function cloudExtension(pi: ExtensionAPI) {
 		if (expectedSession === ctx.sessionManager.getSessionId() && revision) {
 			const file = ctx.sessionManager.getSessionFile();
 			if (file) {
-				try { await client.recordResume(file, revision); }
-				catch (error) {
+				try {
+					await client.recordResume(file, revision);
+					// Consume the CLI handoff once; reloads must not reset advanced ancestry.
+					delete process.env.PI_CLOUD_RESUME_SESSION_ID;
+					delete process.env.PI_CLOUD_RESUME_REVISION;
+				} catch (error) {
 					if (ctx.hasUI) ctx.ui.notify(`Cloud continuation is local only: ${error instanceof Error ? error.message : error}`, "error");
 				}
 			}

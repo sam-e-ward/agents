@@ -1,0 +1,29 @@
+{
+  "name": "pi-cloud",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Opt-in, local-first conversation sync for pi",
+  "type": "module",
+  "engines": {
+    "node": ">=24.14.0"
+  },
+  "bin": {
+    "pi-cloud": "./dist/cli.js"
+  },
+  "scripts": {
+    "cloud": "node src/cli.ts",
+    "check": "tsc --noEmit",
+    "build": "tsc"
+  },
+  "pi": {
+    "extensions": ["./src/extension.ts"]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^7.0.2"
+  }
+}

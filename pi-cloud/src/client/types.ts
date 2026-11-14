@@ -62,6 +62,7 @@ export interface PendingUpload {
 }
 
 export interface StoredBinding extends Binding {
+	leafSnapshotHash?: string;
 	lastFingerprint?: string;
 	outbox?: PendingUpload;
 }

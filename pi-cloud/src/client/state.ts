@@ -43,6 +43,7 @@ export function parseState(value: unknown): ProfileState {
 			headRevisionId: binding.headRevisionId === null ? null : revisionKey(binding.headRevisionId), enabled: binding.enabled,
 		};
 		if (binding.leafId !== undefined) parsed.leafId = binding.leafId === null ? null : text(binding.leafId, "active leaf", 256);
+		if (binding.leafSnapshotHash !== undefined) parsed.leafSnapshotHash = revisionKey(binding.leafSnapshotHash);
 		if (binding.lastFingerprint !== undefined) parsed.lastFingerprint = revisionKey(binding.lastFingerprint);
 		if (binding.outbox !== undefined) {
 			const pending = object(binding.outbox, "outbox");

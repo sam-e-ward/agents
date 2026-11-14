@@ -1,0 +1,18 @@
+# Example systemd user unit. Replace BOTH absolute paths for your installation.
+[Unit]
+Description=Pi conversation sync server
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/absolute/path/to/node /absolute/path/to/agents/pi-cloud/dist/cli.js server start
+Environment=PI_CLOUD_SERVER_HOME=%h/.pi/cloud-server
+UMask=0077
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target

@@ -125,7 +125,12 @@ export class CloudClient {
 		return this.#withState(async (state) => {
 			if (!state.credential) return;
 			const auth = this.#auth(state);
-			await request(auth.serverUrl, "/v1/device", { method: "DELETE", token: auth.token, expectedStatus: 204 });
+			try {
+				await request(auth.serverUrl, "/v1/device", { method: "DELETE", token: auth.token, expectedStatus: 204 });
+			} catch (error) {
+				// An administrator may already have revoked this credential.
+				if (!(error instanceof CloudHttpError && error.status === 401)) throw error;
+			}
 			state.credential = null;
 			// An explicitly revoked device can no longer submit its drafts. Keep acknowledged ancestry.
 			for (const binding of state.bindings) delete binding.outbox;
@@ -167,6 +172,19 @@ export class CloudClient {
 		return this.#withState(async (state) => structuredClone(state.projects));
 	}
 
+	async bindings(): Promise<Binding[]> {
+		return this.#withState(async (state) => state.bindings.map(publicBinding));
+	}
+
+	async deleteConversation(id: string): Promise<void> {
+		uuid(id, "conversation ID");
+		return this.#withState(async (state) => {
+			const auth = this.#auth(state);
+			await request(auth.serverUrl, `/v1/conversations/${id}`, { method: "DELETE", token: auth.token, expectedStatus: 204 });
+			await this.#block(state, id);
+		});
+	}
+
 	async #sessionMapping(state: ProfileState, projectId: string, cwd: string): Promise<ProjectMapping> {
 		const canonical = await canonicalDirectory(cwd);
 		const candidates = state.projects.filter((mapping) => mapping.id === projectId && isWithin(mapping.root, canonical));
@@ -180,7 +198,8 @@ export class CloudClient {
 		if (leafId !== undefined && leafId !== null) text(leafId, "active leaf", 256);
 		return this.#withState(async (state) => {
 			const file = await canonicalSessionFile(sessionFile);
-			const session = parseSnapshot(await stableSnapshot(file));
+			const snapshot = await stableSnapshot(file);
+			const session = parseSnapshot(snapshot);
 			await this.#sessionMapping(state, projectId, session.header.cwd);
 			activeLeaf(session, leafId);
 			let binding = state.bindings.find((binding) => binding.sessionFile === file);
@@ -192,8 +211,13 @@ export class CloudClient {
 				binding = { sessionFile: file, conversationId: randomUUID(), projectId, headRevisionId: null, enabled: true };
 				state.bindings.push(binding);
 			}
-			if (leafId === undefined) delete binding.leafId;
-			else binding.leafId = leafId;
+			if (leafId === undefined) {
+				delete binding.leafId;
+				delete binding.leafSnapshotHash;
+			} else {
+				binding.leafId = leafId;
+				binding.leafSnapshotHash = createHash("sha256").update(snapshot).digest("hex");
+			}
 			await this.#save(state);
 			return publicBinding(binding);
 		});
@@ -294,7 +318,10 @@ export class CloudClient {
 			const session = parseSnapshot(snapshot);
 			const mapping = await this.#sessionMapping(state, binding.projectId, session.header.cwd);
 			const { cwd, relativeCwd } = await resolveProjectCwd(mapping, session.header.cwd);
-			const leafId = activeLeaf(session, binding.leafId);
+			// A saved leaf is authoritative only for the snapshot observed by the extension.
+			// After a crash, newer on-disk entries must not resume at a stale checkpoint.
+			const snapshotHash = createHash("sha256").update(snapshot).digest("hex");
+			const leafId = activeLeaf(session, binding.leafSnapshotHash === snapshotHash ? binding.leafId : undefined);
 			const digest = fingerprint(snapshot, leafId);
 			if (binding.lastFingerprint === digest) { result.skipped++; return; }
 			const draft = parseDraft({

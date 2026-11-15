@@ -20,7 +20,7 @@ info()  { echo -e "${CYAN} →${NC} $1"; }
 ok()    { echo -e "${GREEN} ✓${NC} $1"; }
 warn()  { echo -e "${YELLOW} ⚠${NC} $1"; }
 
-# ── Ensure pi is on PATH ───────────────────────────────────────────────
+# ── Install pi if missing ──────────────────────────────────────────────
 ensure_pi() {
   if command -v pi &>/dev/null; then
     ok "pi found on PATH ($(command -v pi))"
@@ -38,15 +38,21 @@ ensure_pi() {
     fi
   done
 
-  # Try npx
-  if command -v npx &>/dev/null; then
-    warn "pi not installed. Run: npx @earendil-works/pi-coding-agent"
-    return
+  if ! command -v npm &>/dev/null; then
+    echo "Error: npm is required to install pi. Install Node.js 22.19 or newer, then rerun this script." >&2
+    exit 1
   fi
 
-  echo "Error: pi is not installed and couldn't be auto-detected." >&2
-  echo "  Install with: npm install -g @earendil-works/pi-coding-agent" >&2
-  exit 1
+  info "Installing pi via npm..."
+  npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+  hash -r
+
+  if ! command -v pi &>/dev/null; then
+    echo "Error: pi was installed but is not on PATH. Add $(npm prefix -g)/bin to PATH, then rerun this script." >&2
+    exit 1
+  fi
+
+  ok "pi installed ($(command -v pi))"
 }
 
 # ── Install Chromium/Chrome for web-browser skill ──────────────────────

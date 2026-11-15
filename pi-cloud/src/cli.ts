@@ -22,7 +22,7 @@ const HELP = `pi-cloud — opt-in conversation sync (Node 24.14+)
   status                                          Safe profile summary
   project add NAME ROOT [--id PROJECT-ID]           Explicitly map a local workspace
   project list
-  track SESSION-FILE [--project ID | --anywhere]   Opt in (new sessions need no project mapping)
+  track SESSION-FILE [--project ID | --anywhere]    Opt in (new sessions need no project mapping)
   untrack SESSION-FILE                             Stop uploads; retain cloud history
   bindings                                        List local session bindings
   sync [--once]                                   Upload tracked sessions and pull changes

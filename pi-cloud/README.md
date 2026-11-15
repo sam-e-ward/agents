@@ -131,7 +131,7 @@ Inside pi, `/cloud resume-here [REVISION-HASH]` resumes into the current session
 
 ### Optional: mapped projects and worktrees
 
-For coding sessions where the checkout matters, register a project on A and explicitly opt that session into mapped tracking:
+For coding sessions where the checkout matters, register a project on A and opt a new session into mapped tracking before its first upload:
 
 ```sh
 just cloud-project-add agents /home/wards/agents
@@ -146,7 +146,7 @@ just cloud-project-add agents /Users/wards/src/agents --id PROJECT-UUID
 just cloud-resume REVISION-HASH --workspace /Users/wards/src/agents --yes
 ```
 
-`--workspace` retains strict project matching and restores the source-relative working directory. It is mutually exclusive with `--here`/`--cwd`. For project-associated conversations, CLI resume without a location flag still uses mapped mode; explicitly use `cloud-resume-here` or `--cwd` to bypass it. Existing saved bindings remain mapped unless you explicitly change their mode.
+`--workspace` retains strict project matching and restores the source-relative working directory. It is mutually exclusive with `--here`/`--cwd`. For project-associated conversations, CLI resume without a location flag still uses mapped mode; explicitly use `cloud-resume-here` or `--cwd` to bypass it. Older saved bindings remain mapped unless you explicitly change their mode. A cloud conversation's project ID is not reassigned; switching a mapped conversation to anywhere mode keeps its original catalogue grouping.
 
 This starts pi with its native `--fork`, a new local session ID and the cloud extension explicitly loaded. The extension associates the new session with the original cloud conversation and parent revision. It remains a normal resumable local session even when the server is offline.
 
@@ -156,7 +156,7 @@ Run `/cloud sync` first to refresh pi's cached conversation picker. `/cloud trac
 
 - Project IDs are independent of filenames, Git remotes and absolute paths.
 - Each device explicitly maps a project ID to one or more local roots. Multiple worktrees require a choice; nested/overlapping project roots are rejected as ambiguous.
-- The session cwd is stored relative to the registered root. A session from `PROJECT/pi` continues in `LOCAL-PROJECT/pi`, not the repository root.
+- In mapped mode, the session cwd is stored relative to the registered root. A session from `PROJECT/pi` continues in `LOCAL-PROJECT/pi`, not the repository root. Anywhere continuations instead use the chosen folder directly and publish their location with relative cwd `.`.
 - Targets must exist. In mapped mode, traversal and symlink escapes outside the mapped root are rejected; missing mappings never silently fall back elsewhere. Anywhere mode deliberately uses the exact directory you select, independently of project roots.
 - Continuation creates a new native session; it never overwrites a cached or open session.
 - All historical entries remain unchanged. A new visible context entry explains the old/current paths and workspace limitations. That entry also restores the selected active branch.

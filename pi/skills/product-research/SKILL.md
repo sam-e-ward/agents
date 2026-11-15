@@ -1,6 +1,6 @@
 ---
 name: product-research
-description: "Research and recommend products or services using current, sourced evidence and community experience. Use for buying advice, category comparisons, or choosing a product/service: maps price and capability tiers first, identifies features owners value, and recommends a small shortlist with trade-offs. Defaults to the UK market; includes second-hand/refurbished options where relevant. Focuses on ballpark prices, not individual listings."
+description: "Research and recommend products or services using current, sourced evidence and community experience. Use for buying advice, category comparisons, or choosing a product/service: maps price and capability tiers first, compares brand strengths and positioning, identifies features owners value, and recommends a small shortlist with trade-offs. Defaults to the UK market; includes second-hand/refurbished options where relevant. Focuses on ballpark prices, not individual listings."
 ---
 
 # Product Research
@@ -90,7 +90,28 @@ is stronger than one viral post; a vote count or star rating alone is not proof
 of quality. Distinguish broad agreement from niche preferences or disputed
 claims. Never invent consensus or numeric signals.
 
-### 3. Build and verify a small shortlist
+### 3. Explain the brand landscape
+
+Compare the relevant brands/providers, not just individual models or plans.
+Explain which compete in which price/capability tiers, their meaningful
+strengths and weaknesses, and who each tends to suit. A brand may span several
+tiers; distinguish its product lines rather than assigning it a single rank.
+Focus on decision-relevant differences such as performance, reliability,
+repairability, support, ecosystem compatibility/lock-in, and ownership costs,
+not brand prestige or marketing positioning alone.
+
+If all or most recommendations come from one brand, explicitly explain why it
+wins for this user's needs against credible alternatives. Identify the closest
+rival brands and what requirements, budget, or trade-offs would make them the
+better choice. Don't add a weaker recommendation just to create brand variety.
+
+Apply the same sourcing and corroboration standards to brand-level claims as
+to product claims. Separate advertised positioning from demonstrated strengths
+and owner sentiment; don't generalise from one model, an old reputation, or
+isolated complaints to an entire brand. Where no meaningful brand-level pattern
+is supported, say the choice is model-specific rather than inventing a hierarchy.
+
+### 4. Build and verify a small shortlist
 
 Choose roughly 2–4 products, model families, or service plans that satisfy the
 criteria, spanning tiers only where it helps the decision. For each, explain
@@ -114,7 +135,7 @@ Identify the best fit for the stated needs, not a universal "best".
   differences. Separate sourced facts, owner sentiment, and your own reasoned
   recommendation. Do not fill gaps with remembered specs or invented prices.
 
-### 4. Consider second-hand and refurbished options where relevant
+### 5. Consider second-hand and refurbished options where relevant
 
 Include a short comparison when there is a meaningful used/refurbished market.
 Compare approximate price tiers with buying new — no specific listings needed.
@@ -147,6 +168,12 @@ _As of <date> · Region: UK (or specified region) · <key assumptions>_
 ### What matters in practice
 - **<criterion>** — why owners value it; community evidence and any disagreement.
 - **User requirements** — how the explicit must-haves constrain the choice.
+
+### Brand landscape
+- Where the relevant brands/product lines sit across tiers and why that matters.
+- Evidence-backed strengths, weaknesses, and when to choose each over rivals.
+- If one brand dominates the shortlist, why it wins and when a rival would win.
+<Keep this brief; if brand differences aren't supported, explain that the choice is model-specific.>
 
 ### Recommendations
 1. **<model/family/plan> — <who it's for>**

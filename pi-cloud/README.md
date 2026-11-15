@@ -7,25 +7,29 @@ An optional, local-first conversation sync layer for pi. Independent of the conf
 ## Requirements and installation
 
 - Node.js **24.14 or newer** (uses built-in SQLite).
+- [just](https://just.systems/) on each machine (`just` 1.59 is verified). SSH remote recipes also require Bash locally and `just`/Node on the remote non-interactive shell's PATH.
 - pi **1.5.0** is the currently verified extension/continuation API.
 - Linux or macOS with a local filesystem for client/server state. Do not share a client profile over NFS or between machines.
 
-From this directory:
+From the repository root or any directory inside it:
 
 ```sh
-npm ci --ignore-scripts
-npm run check
-npm run build
-node dist/cli.js --help
+just                         # List commands
+just cloud-setup             # Install locked dependencies, check and build
+just cloud --help            # Full CLI interface
 ```
 
-All examples below use `node dist/cli.js`; you can optionally run `npm link` to put `pi-cloud` on PATH. The CLI and server have no third-party runtime dependencies. Pi/TypeScript dependencies are for extension development and checking.
+The root `justfile` covers both client and server commands. `just cloud ...` forwards any CLI operation; named recipes provide convenient shortcuts. It runs the TypeScript source directly so a stale build cannot hide changes. `just cloud-check` and `just cloud-build` are also available separately. The CLI/server have no third-party runtime dependencies; installed Pi/TypeScript packages support extension development and checking.
+
+**Paths and `--here` refer to the directory where you invoked `just`**, not the directory containing the justfile. From outside this checkout, use `just --justfile /path/to/agents/justfile cloud-resume-here ...`.
 
 Install the optional extension separately (this does not modify `../pi/`):
 
 ```sh
-pi install /absolute/path/to/agents/pi-cloud
+just cloud-install-extension
 ```
+
+Use `just cloud-remove-extension` to unregister it. Both accept `--local` for a project-local installation.
 
 Restart pi or `/reload`. Nothing is uploaded just by installing or logging in.
 
@@ -34,7 +38,8 @@ Restart pi or `/reload`. Nothing is uploaded just by installing or logging in.
 On the server, build the package and start it under your service manager, or in a terminal:
 
 ```sh
-node dist/cli.js server start
+just cloud-setup
+just cloud-server-start
 ```
 
 It listens on `127.0.0.1:4210`. Its data lives at `~/.pi/cloud-server`, overrideable with `PI_CLOUD_SERVER_HOME` or `--data DIR`.
@@ -42,17 +47,27 @@ It listens on `127.0.0.1:4210`. Its data lives at `~/.pi/cloud-server`, override
 On the client, establish a tunnel in a separate terminal:
 
 ```sh
-ssh -N -L 4210:127.0.0.1:4210 my-server
+just cloud-tunnel my-server
+# Optional local and remote ports:
+# just cloud-tunnel my-server 14210 4210
 ```
 
 `my-server` can be an SSH alias reached via NetBird or Tailscale. The application does not depend on either product.
 
-Create a ten-minute, single-use enrollment token on the server and pipe it into client login. Assuming the server checkout is `/srv/agents`:
+Create a ten-minute, single-use enrollment token remotely and pipe it directly into client login. Assuming the server checkout is `/srv/agents`:
 
 ```sh
-ssh my-server 'cd /srv/agents/pi-cloud && node dist/cli.js server enroll laptop' \
-  | node dist/cli.js login http://127.0.0.1:4210 --token-stdin --name laptop
+just cloud-login-ssh my-server /srv/agents http://127.0.0.1:4210 laptop
 ```
+
+Or use the individual recipes (only the token travels through stdout):
+
+```sh
+just cloud-remote my-server /srv/agents cloud-server-enroll laptop \
+  | just cloud-login http://127.0.0.1:4210 --name laptop
+```
+
+`just cloud-remote HOST CHECKOUT RECIPE [ARGS...]` can also run setup and administration remotely, for example `just cloud-remote my-server /srv/agents cloud-setup`. Remote checkout paths and recipe arguments are shell-quoted; secrets are never placed in SSH arguments.
 
 Only the enrollment token is written to server-command stdout; diagnostics go to stderr. Avoid saving tokens in shell history, logs or world-readable files. If the login response is lost, create another enrollment token and revoke the unused device with `server devices` / `server revoke`.
 
@@ -60,15 +75,16 @@ Each client profile pins one server URL. Use the same tunnel address consistentl
 
 For direct mesh access, put the HTTP service behind an **HTTPS** reverse proxy. Client URLs permit plain HTTP only on loopback, reject embedded credentials, and never follow redirects. `server start --host ADDRESS` exposes plain HTTP and should only be used in a controlled reverse-proxy deployment.
 
-## Register a project and opt in a session
+## Opt in a session — no project matching required
 
-On machine A:
+For conversations where the working folder is unimportant, no project registration is needed:
 
 ```sh
-node dist/cli.js project add agents /home/wards/agents
+just cloud-track /absolute/path/to/session.jsonl
+just cloud-sync
 ```
 
-The output includes a stable project UUID. Keep it for mapping the same project on other machines.
+New sessions tracked without `--project` are grouped under **Unfiled**, and their original folder is descriptive metadata only. The source folder does not need to exist to upload an archived session file. Existing tracked sessions keep their current mode; use `just cloud-track SESSION-FILE --anywhere` to disable matching for an existing binding without changing its cloud identity.
 
 In pi, after the session has been saved:
 
@@ -82,8 +98,8 @@ In pi, after the session has been saved:
 Alternatively, opt in a specific file from the CLI:
 
 ```sh
-node dist/cli.js track /absolute/path/to/session.jsonl --project PROJECT-UUID
-node dist/cli.js sync --once
+just cloud-track /absolute/path/to/session.jsonl
+just cloud-sync --once
 ```
 
 Only explicitly tracked native session files are scanned/uploaded. Tracking one session does not enable an entire directory, new sessions, forks or subagents. This conservative default is also the initial exclusion policy: leave sensitive sessions untracked.
@@ -92,32 +108,56 @@ Disable further uploads with `/cloud off` or `untrack SESSION-FILE`. Previously 
 
 ## Continue on machine B
 
-Enroll B, then explicitly map the **same project ID** to its local checkout:
+Enroll B, then pull conversations:
 
 ```sh
-node dist/cli.js project add agents /Users/wards/src/agents --id PROJECT-UUID
-node dist/cli.js sync
-node dist/cli.js sessions
+just cloud-sync
+just cloud-sessions
 ```
 
-The catalogue shows conversation IDs, project IDs and revision heads. Choose a revision:
+### Anywhere: ignore project and folder matching
+
+Resume **any** conversation in your current directory, including a conversation originally attached to a project:
 
 ```sh
-# Without --yes, only shows the destination and warnings.
-node dist/cli.js resume REVISION-HASH --workspace /Users/wards/src/agents
-node dist/cli.js resume REVISION-HASH --workspace /Users/wards/src/agents --yes
+just cloud-resume-here REVISION-HASH --yes
+# Or choose an arbitrary existing folder, with no project registration:
+just cloud-resume REVISION-HASH --cwd /path/to/notes --yes
 ```
+
+Without `--yes`, these commands only preview the destination and warnings. Unfiled sessions also default to the caller's directory with `just cloud-resume REVISION-HASH --yes`. Neither mode recreates the old directory hierarchy. The new local continuation stays in **anywhere** mode, so later uploads and checkpoint syncs do not require a mapping either. The original cloud conversation/ancestry is preserved.
+
+Inside pi, `/cloud resume-here [REVISION-HASH]` resumes into the current session's directory; omit the revision to open the conversation picker. `/cloud sessions` and `/cloud resume` offer **Here (ignore project matching)** alongside available mapped workspaces. Unfiled sessions use the current directory directly. A confirmation still shows the destination and warns that historical paths may be unrelated.
+
+### Optional: mapped projects and worktrees
+
+For coding sessions where the checkout matters, register a project on A and explicitly opt that session into mapped tracking:
+
+```sh
+just cloud-project-add agents /home/wards/agents
+just cloud-track SESSION-FILE --project PROJECT-UUID
+# Or use /cloud track mapped inside pi after registering the root.
+```
+
+Map the **same project ID** to B's checkout:
+
+```sh
+just cloud-project-add agents /Users/wards/src/agents --id PROJECT-UUID
+just cloud-resume REVISION-HASH --workspace /Users/wards/src/agents --yes
+```
+
+`--workspace` retains strict project matching and restores the source-relative working directory. It is mutually exclusive with `--here`/`--cwd`. For project-associated conversations, CLI resume without a location flag still uses mapped mode; explicitly use `cloud-resume-here` or `--cwd` to bypass it. Existing saved bindings remain mapped unless you explicitly change their mode.
 
 This starts pi with its native `--fork`, a new local session ID and the cloud extension explicitly loaded. The extension associates the new session with the original cloud conversation and parent revision. It remains a normal resumable local session even when the server is offline.
 
-Inside pi, `/cloud sessions` opens the cached conversation picker; `/cloud resume REVISION-HASH` selects a specific continuation. Run `/cloud sync` first to refresh the cache. No remote conversation is executed merely because it was downloaded.
+Run `/cloud sync` first to refresh pi's cached conversation picker. `/cloud track` enables a new session without project matching; `/cloud track mapped` opts into matching and `/cloud track anywhere` switches an existing binding to folder-agnostic sync. No remote conversation is executed merely because it was downloaded.
 
 ### Paths and worktrees
 
 - Project IDs are independent of filenames, Git remotes and absolute paths.
 - Each device explicitly maps a project ID to one or more local roots. Multiple worktrees require a choice; nested/overlapping project roots are rejected as ambiguous.
 - The session cwd is stored relative to the registered root. A session from `PROJECT/pi` continues in `LOCAL-PROJECT/pi`, not the repository root.
-- Targets must exist. Traversal and symlink escapes outside the mapped root are rejected. Missing mappings never fall back to `$HOME` or the current shell directory.
+- Targets must exist. In mapped mode, traversal and symlink escapes outside the mapped root are rejected; missing mappings never silently fall back elsewhere. Anywhere mode deliberately uses the exact directory you select, independently of project roots.
 - Continuation creates a new native session; it never overwrites a cached or open session.
 - All historical entries remain unchanged. A new visible context entry explains the old/current paths and workspace limitations. That entry also restores the selected active branch.
 - Cloud ancestry uses revision IDs. Native `parentSession` points to a local cached snapshot or handoff source, not a path on another machine.
@@ -137,17 +177,19 @@ Client state, credentials, outbox and cache live under `~/.pi/cloud` (`PI_CLOUD_
 
 ## Commands
 
-Run `node dist/cli.js --help` for the complete interface. Useful administrative commands:
+Run `just` for the recipe list and `just cloud --help` for the complete CLI interface. Useful administrative commands:
 
 ```sh
-node dist/cli.js status
-node dist/cli.js bindings
-node dist/cli.js project list
-node dist/cli.js server devices
-node dist/cli.js server revoke DEVICE-UUID
-node dist/cli.js logout
-node dist/cli.js delete CONVERSATION-UUID --yes
+just cloud-status
+just cloud-bindings
+just cloud-projects
+just cloud-server-devices
+just cloud-server-revoke DEVICE-UUID
+just cloud-logout
+just cloud-delete CONVERSATION-UUID --yes
 ```
+
+`PI_CLOUD_HOME` and `PI_CLOUD_SERVER_HOME` work with every recipe. Server administration also accepts `--data DIR`; for example, `just cloud-server-enroll laptop --data /private/cloud-server`.
 
 Logout revokes the device before removing the local credential. Network failure leaves it available for retry; already-revoked credentials can be forgotten. Re-enrollment may use the same profile for the same server.
 

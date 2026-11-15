@@ -11,7 +11,9 @@ export function continuationContext(plan: ResumePlan): string {
 		`Cloud revision: ${plan.revision.id}`,
 		`Previous project root: ${JSON.stringify(plan.revision.sourceRoot)}`,
 		`Previous working directory: ${JSON.stringify(plan.revision.sourceCwd)}`,
-		`Current project root: ${JSON.stringify(plan.projectRoot)}`,
+		plan.workspaceMode === "anywhere"
+			? "Project matching: bypassed; this directory was chosen independently of the original workspace."
+			: `Current project root: ${JSON.stringify(plan.projectRoot)}`,
 		`Current working directory: ${JSON.stringify(plan.targetCwd)}`,
 		"Historical paths, tool results, extension state, and file contents may describe the previous machine.",
 		"The workspace, Git state, dependencies, credentials, and running processes have NOT been synced.",

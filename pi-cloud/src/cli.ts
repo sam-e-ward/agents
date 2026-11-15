@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { CloudClient } from "./client/index.ts";
 import { writeHandoffSource } from "./resume.ts";
+import { UNFILED_PROJECT } from "./protocol.ts";
 
 const HELP = `pi-cloud — opt-in conversation sync (Node 24.14+)
 
@@ -21,12 +22,13 @@ const HELP = `pi-cloud — opt-in conversation sync (Node 24.14+)
   status                                          Safe profile summary
   project add NAME ROOT [--id PROJECT-ID]           Explicitly map a local workspace
   project list
-  track SESSION-FILE --project PROJECT-ID          Opt this session into syncing
+  track SESSION-FILE [--project ID | --anywhere]   Opt in (new sessions need no project mapping)
   untrack SESSION-FILE                             Stop uploads; retain cloud history
   bindings                                        List local session bindings
   sync [--once]                                   Upload tracked sessions and pull changes
   sessions                                        List cached conversations and revision heads
-  resume REVISION-ID [--workspace ROOT] [--yes]     Fork into a mapped workspace and start pi
+  resume REVISION-ID [--workspace ROOT | --here | --cwd DIR] [--yes]
+                                                  Fork locally; --here/--cwd bypass project matching
   delete CONVERSATION-ID --yes                     Explicit cloud tombstone; native files kept
 
 Client state: PI_CLOUD_HOME or ~/.pi/cloud
@@ -96,9 +98,18 @@ async function serverCommand(args: string[]): Promise<void> {
 }
 
 async function resume(client: CloudClient, args: string[]): Promise<void> {
-	const { values, positionals } = argumentsFor(args, { workspace: { type: "string" }, yes: { type: "boolean" } });
-	arity(positionals, 1, "resume REVISION-ID [--workspace ROOT] --yes");
-	const plan = await client.prepareResume(positionals[0], values.workspace as string | undefined);
+	const { values, positionals } = argumentsFor(args, {
+		workspace: { type: "string" }, here: { type: "boolean" }, cwd: { type: "string" }, yes: { type: "boolean" },
+	});
+	arity(positionals, 1, "resume REVISION-ID [--workspace ROOT | --here | --cwd DIR] --yes");
+	if ([values.workspace, values.here, values.cwd].filter((value) => value !== undefined).length > 1) {
+		throw new Error("Choose only one of --workspace, --here and --cwd");
+	}
+	const revision = await client.getRevision(positionals[0]);
+	const anywhere = values.here || values.cwd !== undefined || values.workspace === undefined && revision.project.id === UNFILED_PROJECT.id;
+	const plan = anywhere
+		? await client.prepareResumeInDirectory(revision.id, values.cwd as string | undefined ?? process.cwd())
+		: await client.prepareResume(revision.id, values.workspace as string | undefined);
 	console.error(`Target workspace: ${plan.targetCwd}`);
 	for (const warning of plan.warnings) console.error(`Warning: ${warning}`);
 	console.error("History only: workspace files and Git state have not been synced.");
@@ -114,6 +125,7 @@ async function resume(client: CloudClient, args: string[]): Promise<void> {
 			env: {
 				...process.env, PI_CLOUD_HOME: client.home,
 				PI_CLOUD_RESUME_SESSION_ID: sessionId, PI_CLOUD_RESUME_REVISION: plan.revision.id,
+				PI_CLOUD_RESUME_WORKSPACE_MODE: plan.workspaceMode,
 			},
 		});
 		child.once("error", reject);
@@ -143,10 +155,10 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
 			output(await client.projects());
 		} else throw new Error("Usage: pi-cloud project add NAME ROOT [--id ID] | project list");
 	} else if (command === "track") {
-		const { values, positionals } = argumentsFor(rest, { project: { type: "string" } });
-		arity(positionals, 1, "track SESSION-FILE --project PROJECT-ID");
-		if (typeof values.project !== "string") throw new Error("track requires --project PROJECT-ID");
-		output(await client.track(positionals[0], values.project));
+		const { values, positionals } = argumentsFor(rest, { project: { type: "string" }, anywhere: { type: "boolean" } });
+		arity(positionals, 1, "track SESSION-FILE [--project PROJECT-ID | --anywhere]");
+		if (values.project !== undefined && values.anywhere) throw new Error("Choose --project or --anywhere, not both");
+		output(await client.track(positionals[0], values.project as string | undefined, undefined, values.anywhere ? "anywhere" : undefined));
 	} else if (command === "sync") {
 		const { positionals } = argumentsFor(rest, { once: { type: "boolean" } });
 		arity(positionals, 0, "sync [--once]");

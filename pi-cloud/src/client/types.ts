@@ -6,10 +6,13 @@ export interface ProjectMapping {
 	root: string;
 }
 
+export type WorkspaceMode = "mapped" | "anywhere";
+
 export interface Binding {
 	sessionFile: string;
 	conversationId: string;
 	projectId: string;
+	workspaceMode: WorkspaceMode;
 	headRevisionId: string | null;
 	enabled: boolean;
 	/** Omitted: derive the last entry. Null: explicitly select the session root. */
@@ -51,7 +54,8 @@ export interface ResumePlan {
 	revision: Revision;
 	snapshotPath: string;
 	targetCwd: string;
-	projectRoot: string;
+	projectRoot: string | null;
+	workspaceMode: WorkspaceMode;
 	warnings: string[];
 }
 

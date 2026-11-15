@@ -12,6 +12,12 @@ export interface Project {
 	name: string;
 }
 
+// Portable sessions still share a stable catalogue identity without requiring a workspace mapping.
+export const UNFILED_PROJECT: Readonly<Project> = Object.freeze({
+	id: "00000000-0000-4000-8000-000000000001",
+	name: "Unfiled",
+});
+
 export interface GitState {
 	branch: string;
 	commit: string;

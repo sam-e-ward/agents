@@ -38,8 +38,12 @@ export function parseState(value: unknown): ProfileState {
 	state.bindings = array(data.bindings).map((value): StoredBinding => {
 		const binding = object(value, "binding");
 		if (typeof binding.enabled !== "boolean") throw new Error("Invalid binding enabled flag");
+		if (binding.workspaceMode !== undefined && binding.workspaceMode !== "mapped" && binding.workspaceMode !== "anywhere") {
+			throw new Error("Invalid workspace mode");
+		}
 		const parsed: StoredBinding = {
 			sessionFile: absolutePath(binding.sessionFile), conversationId: uuid(binding.conversationId), projectId: uuid(binding.projectId),
+			workspaceMode: binding.workspaceMode ?? "mapped",
 			headRevisionId: binding.headRevisionId === null ? null : revisionKey(binding.headRevisionId), enabled: binding.enabled,
 		};
 		if (binding.leafId !== undefined) parsed.leafId = binding.leafId === null ? null : text(binding.leafId, "active leaf", 256);

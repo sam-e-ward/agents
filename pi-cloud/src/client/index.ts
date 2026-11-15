@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-	object, parseDraft, parseRevision, parseSnapshot, revisionId, revisionKey, text, uuid,
+	UNFILED_PROJECT, object, parseDraft, parseRevision, parseSnapshot, revisionId, revisionKey, text, uuid,
 } from "../protocol.ts";
 import type { Change, ChangePage, ConversationSummary, Revision, SessionSnapshot } from "../protocol.ts";
 import {
@@ -11,18 +11,18 @@ import {
 import { atomicWrite, canonicalSessionFile, privateDirectory, readPrivate, stableSnapshot, withProfileLock } from "./filesystem.ts";
 import { CloudHttpError, request, validateServerUrl } from "./http.ts";
 import { emptyState, parseState } from "./state.ts";
-import type { Binding, CloudStatus, DeviceInfo, ProfileState, ProjectMapping, ResumePlan, StoredBinding, SyncResult } from "./types.ts";
+import type { Binding, CloudStatus, DeviceInfo, ProfileState, ProjectMapping, ResumePlan, StoredBinding, SyncResult, WorkspaceMode } from "./types.ts";
 import { canonicalDirectory, isWithin, readGitState, resolveProjectCwd, resolveRevisionCwd, resumeWarnings } from "./workspace.ts";
 
-export type { Binding, CloudStatus, DeviceInfo, ProjectMapping, ResumePlan, SyncIssue, SyncResult } from "./types.ts";
+export type { Binding, CloudStatus, DeviceInfo, ProjectMapping, ResumePlan, SyncIssue, SyncResult, WorkspaceMode } from "./types.ts";
 export type { Change, ChangePage, ConversationSummary, GitState, Project, Revision, RevisionDraft, SessionSnapshot } from "../protocol.ts";
 export { atomicWrite, canonicalSessionFile, privateDirectory, readPrivate, stableSnapshot, withProfileLock } from "./filesystem.ts";
 export { canonicalDirectory, isWithin, readGitState, resolveProjectCwd, resolveRevisionCwd, resumeWarnings } from "./workspace.ts";
 export { CloudHttpError, validateServerUrl } from "./http.ts";
 
 function publicBinding(binding: StoredBinding): Binding {
-	const { sessionFile, conversationId, projectId, headRevisionId, enabled, leafId } = binding;
-	return { sessionFile, conversationId, projectId, headRevisionId, enabled, ...(leafId === undefined ? {} : { leafId }) };
+	const { sessionFile, conversationId, projectId, workspaceMode, headRevisionId, enabled, leafId } = binding;
+	return { sessionFile, conversationId, projectId, workspaceMode, headRevisionId, enabled, ...(leafId === undefined ? {} : { leafId }) };
 }
 
 function activeLeaf(session: SessionSnapshot, requested?: string | null): string | null {
@@ -193,22 +193,26 @@ export class CloudClient {
 		return candidates[0];
 	}
 
-	async track(sessionFile: string, projectId: string, leafId?: string | null): Promise<Binding> {
-		uuid(projectId, "project ID");
+	async track(sessionFile: string, projectId?: string, leafId?: string | null, workspaceMode?: WorkspaceMode): Promise<Binding> {
+		if (projectId !== undefined) uuid(projectId, "project ID");
+		if (workspaceMode !== undefined && workspaceMode !== "mapped" && workspaceMode !== "anywhere") throw new Error("Invalid workspace mode");
 		if (leafId !== undefined && leafId !== null) text(leafId, "active leaf", 256);
 		return this.#withState(async (state) => {
 			const file = await canonicalSessionFile(sessionFile);
 			const snapshot = await stableSnapshot(file);
 			const session = parseSnapshot(snapshot);
-			await this.#sessionMapping(state, projectId, session.header.cwd);
 			activeLeaf(session, leafId);
 			let binding = state.bindings.find((binding) => binding.sessionFile === file);
+			const effectiveProject = projectId ?? binding?.projectId ?? UNFILED_PROJECT.id;
+			const mode = workspaceMode ?? (projectId ? "mapped" : binding?.workspaceMode ?? "anywhere");
+			if (mode === "mapped") await this.#sessionMapping(state, effectiveProject, session.header.cwd);
 			if (binding) {
-				if (binding.projectId !== projectId) throw new Error("Session is already bound to another cloud project");
+				if (binding.projectId !== effectiveProject) throw new Error("Session is already bound to another cloud project");
 				if (state.tombstones.includes(binding.conversationId)) throw new Error("Conversation has been deleted; this binding cannot be re-enabled");
 				binding.enabled = true;
+				binding.workspaceMode = mode;
 			} else {
-				binding = { sessionFile: file, conversationId: randomUUID(), projectId, headRevisionId: null, enabled: true };
+				binding = { sessionFile: file, conversationId: randomUUID(), projectId: effectiveProject, workspaceMode: mode, headRevisionId: null, enabled: true };
 				state.bindings.push(binding);
 			}
 			if (leafId === undefined) {
@@ -310,14 +314,27 @@ export class CloudClient {
 		}
 	}
 
+	async #uploadWorkspace(state: ProfileState, binding: StoredBinding, cwd: string) {
+		if (binding.workspaceMode === "mapped") {
+			const mapping = await this.#sessionMapping(state, binding.projectId, cwd);
+			const resolved = await resolveProjectCwd(mapping, cwd);
+			return { project: { id: mapping.id, name: mapping.name }, root: mapping.root, relativeCwd: resolved.relativeCwd };
+		}
+		const project = state.revisions.find((revision) => revision.id === binding.headRevisionId)?.project
+			?? state.projects.find((project) => project.id === binding.projectId)
+			?? (binding.projectId === UNFILED_PROJECT.id ? UNFILED_PROJECT : undefined);
+		if (!project) throw new Error("Cloud project metadata is unavailable for this conversation");
+		// Cwd is descriptive only in anywhere mode; the original folder need not still exist.
+		return { project: { id: project.id, name: project.name }, root: cwd, relativeCwd: "." };
+	}
+
 	async #upload(state: ProfileState, binding: StoredBinding, result: SyncResult): Promise<void> {
 		const auth = this.#auth(state);
 		const retrying = binding.outbox !== undefined;
 		if (!binding.outbox) {
 			const snapshot = await stableSnapshot(binding.sessionFile);
 			const session = parseSnapshot(snapshot);
-			const mapping = await this.#sessionMapping(state, binding.projectId, session.header.cwd);
-			const { cwd, relativeCwd } = await resolveProjectCwd(mapping, session.header.cwd);
+			const workspace = await this.#uploadWorkspace(state, binding, session.header.cwd);
 			// A saved leaf is authoritative only for the snapshot observed by the extension.
 			// After a crash, newer on-disk entries must not resume at a stale checkpoint.
 			const snapshotHash = createHash("sha256").update(snapshot).digest("hex");
@@ -326,9 +343,9 @@ export class CloudClient {
 			if (binding.lastFingerprint === digest) { result.skipped++; return; }
 			const draft = parseDraft({
 				conversationId: binding.conversationId, parentRevisionId: binding.headRevisionId, deviceId: auth.deviceId,
-				project: { id: mapping.id, name: mapping.name }, relativeCwd, sourceRoot: mapping.root,
+				project: workspace.project, relativeCwd: workspace.relativeCwd, sourceRoot: workspace.root,
 				sourceCwd: session.header.cwd, nativeSessionId: session.header.id, title: sessionTitle(session), leafId,
-				git: await readGitState(cwd), snapshot,
+				git: await readGitState(session.header.cwd), snapshot,
 			});
 			binding.outbox = { id: revisionId(draft), draft, fingerprint: digest };
 			await this.#save(state);
@@ -393,12 +410,26 @@ export class CloudClient {
 			if (mappings.length !== 1) throw new Error("Register the target workspace for this cloud project first; specify workspaceRoot when multiple mappings exist");
 			const mapping = mappings[0];
 			const targetCwd = await resolveRevisionCwd(revision, mapping);
-			return { revision, snapshotPath: snapshotPath(this.home, revision.id), targetCwd, projectRoot: mapping.root, warnings: await resumeWarnings(revision, targetCwd) };
+			return { revision, snapshotPath: snapshotPath(this.home, revision.id), targetCwd, projectRoot: mapping.root, workspaceMode: "mapped", warnings: await resumeWarnings(revision, targetCwd) };
 		});
 	}
 
-	async recordResume(sessionFile: string, revisionId: string): Promise<Binding> {
+	async prepareResumeInDirectory(revisionId: string, directory: string): Promise<ResumePlan> {
 		revisionKey(revisionId);
+		return this.#withState(async (state) => {
+			const revision = await this.#revision(state, revisionId);
+			const targetCwd = await canonicalDirectory(directory);
+			return {
+				revision, snapshotPath: snapshotPath(this.home, revision.id), targetCwd,
+				projectRoot: null, workspaceMode: "anywhere",
+				warnings: ["Project matching was explicitly bypassed; historical paths may refer to unrelated files.", ...await resumeWarnings(revision, targetCwd)],
+			};
+		});
+	}
+
+	async recordResume(sessionFile: string, revisionId: string, workspaceMode: WorkspaceMode = "mapped"): Promise<Binding> {
+		revisionKey(revisionId);
+		if (workspaceMode !== "mapped" && workspaceMode !== "anywhere") throw new Error("Invalid workspace mode");
 		return this.#withState(async (state) => {
 			const revision = await this.#revision(state, revisionId);
 			const file = await canonicalSessionFile(sessionFile);
@@ -407,9 +438,13 @@ export class CloudClient {
 			if (isWithin(snapshotDirectory, file) || isWithin(revisionDirectory, file)) throw new Error("Resume must be a new native pi session, not a cached cloud snapshot");
 			const snapshot = await stableSnapshot(file);
 			const session = parseSnapshot(snapshot);
-			const mapping = await this.#sessionMapping(state, revision.project.id, session.header.cwd);
-			const current = await resolveProjectCwd(mapping, session.header.cwd);
-			if (current.cwd !== await resolveRevisionCwd(revision, mapping)) throw new Error("Resumed session header cwd does not match the revision's mapped working directory");
+			if (workspaceMode === "mapped") {
+				const mapping = await this.#sessionMapping(state, revision.project.id, session.header.cwd);
+				const current = await resolveProjectCwd(mapping, session.header.cwd);
+				if (current.cwd !== await resolveRevisionCwd(revision, mapping)) throw new Error("Resumed session header cwd does not match the revision's mapped working directory");
+			} else {
+				await canonicalDirectory(session.header.cwd);
+			}
 			const existing = state.bindings.find((binding) => binding.sessionFile === file);
 			if (existing) {
 				if (existing.conversationId !== revision.conversationId || existing.projectId !== revision.project.id || existing.headRevisionId !== revision.id) {
@@ -418,7 +453,7 @@ export class CloudClient {
 				return publicBinding(existing);
 			}
 			const binding: StoredBinding = {
-				sessionFile: file, conversationId: revision.conversationId, projectId: revision.project.id,
+				sessionFile: file, conversationId: revision.conversationId, projectId: revision.project.id, workspaceMode,
 				headRevisionId: revision.id, enabled: true,
 			};
 			state.bindings.push(binding);

@@ -56,6 +56,25 @@ cloud-server-devices *args:
 cloud-server-revoke device *args:
     @node "$_PI_CLOUD_ROOT/pi-cloud/src/cli.ts" server revoke "$@"
 
+# Run a just recipe in a remote checkout (e.g. cloud-setup or cloud-server-enroll NAME).
+[no-cd]
+cloud-remote host checkout +args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    # SSH passes a command through a remote shell; quote every argument for that shell too.
+    shell_quote() { printf "'%s'" "${1//\'/\'\\\'\'}"; }
+    remote="cd -- $(shell_quote "$2") && just"
+    for argument in "${@:3}"; do remote+=" $(shell_quote "$argument")"; done
+    exec ssh -- "$1" "$remote"
+
+# Enroll remotely and log in locally without exposing the token in arguments or files.
+[no-cd]
+cloud-login-ssh host checkout url name:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    just --justfile "$_PI_CLOUD_ROOT/justfile" cloud-remote "$1" "$2" cloud-server-enroll "$4" \
+        | just --justfile "$_PI_CLOUD_ROOT/justfile" cloud-login "$3" --name "$4"
+
 # Read a token from stdin: just cloud-server-enroll NAME | just cloud-login URL.
 [no-cd]
 cloud-login url *args:

@@ -40,7 +40,6 @@ const _knownTools = new Set<string>([
     "auto-commit",
     "branch-context",
     "loop",
-    "session-summary",
 ]);
 
 function loadConfig(): ToolModelsConfig {

@@ -40,6 +40,7 @@ const _knownTools = new Set<string>([
     "auto-commit",
     "branch-context",
     "loop",
+    "resume-search",
 ]);
 
 function loadConfig(): ToolModelsConfig {
